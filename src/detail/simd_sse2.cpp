@@ -43,13 +43,13 @@ void power_spectrum_cf32f32_sse2_impl(float* dst, const float* src, const size_t
     const __m128 output_scale_ps = _mm_set1_ps(output_scale);
     size_t i = 0;
 
-    for (; i + 2U <= len; i += 2U) {
-        const __m128 x = _mm_mul_ps(_mm_loadu_ps(src + 2U * i), inverse_normalization_ps);
-        const __m128 sq = _mm_mul_ps(x, x);
-        const __m128 swapped = _mm_shuffle_ps(sq, sq, _MM_SHUFFLE(2, 3, 0, 1));
-        const __m128 pair_sum = _mm_add_ps(sq, swapped);
-        const __m128 packed = _mm_mul_ps(_mm_unpacklo_ps(pair_sum, _mm_movehl_ps(pair_sum, pair_sum)), output_scale_ps);
-        _mm_storel_pi(reinterpret_cast<__m64*>(dst + i), packed);
+    for (; i + 4U <= len; i += 4U) {
+        const __m128 lo = _mm_loadu_ps(src + 2U * i);
+        const __m128 hi = _mm_loadu_ps(src + 2U * i + 4U);
+        const __m128 re = _mm_mul_ps(_mm_shuffle_ps(lo, hi, _MM_SHUFFLE(2, 0, 2, 0)), inverse_normalization_ps);
+        const __m128 im = _mm_mul_ps(_mm_shuffle_ps(lo, hi, _MM_SHUFFLE(3, 1, 3, 1)), inverse_normalization_ps);
+        const __m128 magnitude_squared = _mm_add_ps(_mm_mul_ps(re, re), _mm_mul_ps(im, im));
+        _mm_storeu_ps(dst + i, _mm_mul_ps(magnitude_squared, output_scale_ps));
     }
 
     if (i < len) {
