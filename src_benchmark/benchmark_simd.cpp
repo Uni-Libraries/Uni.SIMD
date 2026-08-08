@@ -21,6 +21,11 @@
 
 #include "cpu_topology.hpp"
 
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -61,14 +66,14 @@ constexpr std::array kWorkloadProfiles{
     WorkloadProfile{"L1 16 KiB", 16U * 1024U},
     WorkloadProfile{"L2 512 KiB", 512U * 1024U},
     WorkloadProfile{"L3 4 MiB", 4U * 1024U * 1024U},
-    WorkloadProfile{"large 64 MiB", 64U * 1024U * 1024U},
+    WorkloadProfile{"large 256 MiB", 256U * 1024U * 1024U},
 };
 constexpr std::size_t kMinimumBatchBytes = 1U * 1024U * 1024U;
 volatile double checksum_sink = 0.0;
 
 struct Config {
-    std::size_t iterations = 100U;
-    std::size_t warmup_iterations = 10U;
+    std::size_t iterations = 10U;
+    std::size_t warmup_iterations = 5U;
 };
 
 struct Statistics {
@@ -81,6 +86,26 @@ enum class ParseResult {
     help,
     error,
 };
+
+#if defined(_WIN32)
+class ConsolePauseOnExit final {
+public:
+    ConsolePauseOnExit() noexcept {
+        std::array<DWORD, 2U> process_ids{};
+        enabled_ = GetConsoleProcessList(process_ids.data(), static_cast<DWORD>(process_ids.size())) == 1U;
+    }
+
+    ~ConsolePauseOnExit() {
+        if (enabled_) {
+            std::cout << "\nPress Enter to exit..." << std::flush;
+            (void)std::cin.get();
+        }
+    }
+
+private:
+    bool enabled_ = false;
+};
+#endif
 
 [[nodiscard]] std::optional<std::size_t> parse_size(const std::string_view text) {
     std::uint64_t value = 0U;
@@ -291,7 +316,7 @@ public:
         }
         fmt::print("\n| {:<30} | {:<8} |", "", "");
         for (std::size_t index = 0U; index < kWorkloadProfiles.size(); ++index) {
-            fmt::print(" {:^21} |", "ns/i GiB/s vs generic");
+            fmt::print(" {:^21} |", "ns/i GiB/s speedup");
         }
         fmt::print("\n{}\n", table_border(widths, '='));
 
@@ -618,7 +643,7 @@ void print_topology_table(const Config& config, const topology::Result& result,
     print_summary_row("Packages / NUMA nodes", fmt::format("{} / {}", result.snapshot.package_count,
                                                              result.snapshot.numa_node_count));
     print_summary_row("Core types", std::to_string(core_classes.size()));
-    print_summary_row("Working sets", "16 KiB / 512 KiB / 4 MiB / 64 MiB");
+    print_summary_row("Working sets", "16 KiB / 512 KiB / 4 MiB / 256 MiB");
     print_summary_row("Repetitions", fmt::format("iterations={}, warmup={}", config.iterations,
                                                   config.warmup_iterations));
     fmt::print("{}\n\n", summary_border);
@@ -679,6 +704,9 @@ void run_benchmarks(const Config& config) {
 } // namespace
 
 int main(const int argc, char** argv) {
+#if defined(_WIN32)
+    const ConsolePauseOnExit pause_on_exit;
+#endif
     Config config;
     const ParseResult parse_result = parse_arguments(argc, argv, config);
     if (parse_result == ParseResult::help) {
