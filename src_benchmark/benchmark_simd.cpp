@@ -61,7 +61,7 @@ constexpr std::array kWorkloadProfiles{
     WorkloadProfile{"L1 16 KiB", 16U * 1024U},
     WorkloadProfile{"L2 512 KiB", 512U * 1024U},
     WorkloadProfile{"L3 4 MiB", 4U * 1024U * 1024U},
-    WorkloadProfile{"large 32 MiB", 32U * 1024U * 1024U},
+    WorkloadProfile{"large 64 MiB", 64U * 1024U * 1024U},
 };
 constexpr std::size_t kMinimumBatchBytes = 1U * 1024U * 1024U;
 volatile double checksum_sink = 0.0;
@@ -618,7 +618,7 @@ void print_topology_table(const Config& config, const topology::Result& result,
     print_summary_row("Packages / NUMA nodes", fmt::format("{} / {}", result.snapshot.package_count,
                                                              result.snapshot.numa_node_count));
     print_summary_row("Core types", std::to_string(core_classes.size()));
-    print_summary_row("Working sets", "16 KiB / 512 KiB / 4 MiB / 32 MiB");
+    print_summary_row("Working sets", "16 KiB / 512 KiB / 4 MiB / 64 MiB");
     print_summary_row("Repetitions", fmt::format("iterations={}, warmup={}", config.iterations,
                                                   config.warmup_iterations));
     fmt::print("{}\n\n", summary_border);
