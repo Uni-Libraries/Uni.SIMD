@@ -55,8 +55,25 @@ std::complex<float> DotProdSymmetricCF32Real_avx2fma(const void* src, const floa
 
     const size_t tail_off = 4U * pair_count;
     const __m256i reverse_complex4 = _mm256_setr_epi32(6, 7, 4, 5, 2, 3, 0, 1);
-    __m256 acc = _mm256_setzero_ps();
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
     size_t k = 0;
+
+    for (; k + 8U <= pair_count; k += 8U) {
+        const __m256 left0 = _mm256_loadu_ps(x + 2U * k);
+        __m256 right0 = _mm256_loadu_ps(x + (tail_off - (2U * k + 6U)));
+        right0 = _mm256_permutevar8x32_ps(right0, reverse_complex4);
+        const __m256 pair_sum0 = _mm256_add_ps(left0, right0);
+        const __m256 tv0 = duplicate_real_taps4_avx2(taps_pairs + k);
+        acc0 = _mm256_fmadd_ps(pair_sum0, tv0, acc0);
+
+        const __m256 left1 = _mm256_loadu_ps(x + 2U * (k + 4U));
+        __m256 right1 = _mm256_loadu_ps(x + (tail_off - (2U * (k + 4U) + 6U)));
+        right1 = _mm256_permutevar8x32_ps(right1, reverse_complex4);
+        const __m256 pair_sum1 = _mm256_add_ps(left1, right1);
+        const __m256 tv1 = duplicate_real_taps4_avx2(taps_pairs + k + 4U);
+        acc1 = _mm256_fmadd_ps(pair_sum1, tv1, acc1);
+    }
 
     for (; k + 4U <= pair_count; k += 4U) {
         const __m256 left = _mm256_loadu_ps(x + 2U * k);
@@ -64,10 +81,10 @@ std::complex<float> DotProdSymmetricCF32Real_avx2fma(const void* src, const floa
         right = _mm256_permutevar8x32_ps(right, reverse_complex4);
         const __m256 pair_sum = _mm256_add_ps(left, right);
         const __m256 tv = duplicate_real_taps4_avx2(taps_pairs + k);
-        acc = _mm256_fmadd_ps(pair_sum, tv, acc);
+        acc0 = _mm256_fmadd_ps(pair_sum, tv, acc0);
     }
 
-    const std::complex<float> vec_acc = reduce_complex_acc_avx2(acc);
+    const std::complex<float> vec_acc = reduce_complex_acc_avx2(_mm256_add_ps(acc0, acc1));
     out.real(out.real() + vec_acc.real());
     out.imag(out.imag() + vec_acc.imag());
 
