@@ -339,6 +339,7 @@ void PowerSpectralDensityCF32F32_avx2(float* dst, const std::complex<float>* src
 
 namespace {
 [[nodiscard]] inline __m256 duplicate_real_taps4_avx2(const float* taps) noexcept {
+    // Match four real taps to the interleaved {real, imag} components of four complex samples.
     const __m128 t = _mm_loadu_ps(taps);
     const __m128 lo = _mm_unpacklo_ps(t, t);
     const __m128 hi = _mm_unpackhi_ps(t, t);
@@ -347,43 +348,48 @@ namespace {
     return out;
 }
 
-[[nodiscard]] inline __m256 mul_accumulate_ps_avx2(__m256 acc, const __m256 a, const __m256 b) noexcept { return _mm256_add_ps(acc, _mm256_mul_ps(a, b)); }
+} // namespace
 
-[[nodiscard]] inline std::complex<float> reduce_complex_acc_avx2(__m256 acc) noexcept {
-    alignas(32) float tmp[8];
-    _mm256_store_ps(tmp, acc);
-    return {tmp[0] + tmp[2] + tmp[4] + tmp[6], tmp[1] + tmp[3] + tmp[5] + tmp[7]};
-}
+std::complex<float> DotProdCF32Real_avx2(const void* src, const float* taps, size_t len) noexcept {
+    if (!src || !taps || len == 0U) {
+        return {};
+    }
 
-template <typename MulAccumulate>
-[[nodiscard]] inline std::complex<float> dotprod_cf32real_avx2_impl(const float* x, const float* taps, size_t len, MulAccumulate&& mulacc) noexcept {
+    const auto* x = static_cast<const float*>(src);
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();
     __m256 acc2 = _mm256_setzero_ps();
     __m256 acc3 = _mm256_setzero_ps();
     size_t i = 0;
 
+    // Use independent accumulators to hide multiply-add latency across groups of 16 samples.
     for (; i + 16U <= len; i += 16U) {
         const __m256 xv0 = _mm256_loadu_ps(x + 2U * (i + 0U));
         const __m256 xv1 = _mm256_loadu_ps(x + 2U * (i + 4U));
         const __m256 xv2 = _mm256_loadu_ps(x + 2U * (i + 8U));
         const __m256 xv3 = _mm256_loadu_ps(x + 2U * (i + 12U));
 
-        acc0 = mulacc(acc0, xv0, duplicate_real_taps4_avx2(taps + i + 0U));
-        acc1 = mulacc(acc1, xv1, duplicate_real_taps4_avx2(taps + i + 4U));
-        acc2 = mulacc(acc2, xv2, duplicate_real_taps4_avx2(taps + i + 8U));
-        acc3 = mulacc(acc3, xv3, duplicate_real_taps4_avx2(taps + i + 12U));
+        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(xv0, duplicate_real_taps4_avx2(taps + i + 0U)));
+        acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(xv1, duplicate_real_taps4_avx2(taps + i + 4U)));
+        acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(xv2, duplicate_real_taps4_avx2(taps + i + 8U)));
+        acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(xv3, duplicate_real_taps4_avx2(taps + i + 12U)));
     }
 
+    // Consume any remaining complete four-sample vectors before the scalar tail.
     for (; i + 4U <= len; i += 4U) {
         const __m256 xv = _mm256_loadu_ps(x + 2U * i);
-        acc0 = mulacc(acc0, xv, duplicate_real_taps4_avx2(taps + i));
+        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(xv, duplicate_real_taps4_avx2(taps + i)));
     }
 
-    const std::complex<float> vec_acc = reduce_complex_acc_avx2(_mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3)));
+    // Fold the four interleaved SIMD lanes into one {real, imag} result.
+    const __m256 vec_acc = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+    const __m128 lane_sum =
+        _mm_add_ps(_mm256_castps256_ps128(vec_acc), _mm256_extractf128_ps(vec_acc, 1));
+    const __m128 complex_sum = _mm_add_ps(lane_sum, _mm_movehl_ps(lane_sum, lane_sum));
+    float acc_re = _mm_cvtss_f32(complex_sum);
+    float acc_im = _mm_cvtss_f32(_mm_shuffle_ps(complex_sum, complex_sum, _MM_SHUFFLE(1, 1, 1, 1)));
 
-    float acc_re = vec_acc.real();
-    float acc_im = vec_acc.imag();
+    // Finish one to three samples without reading beyond the input ranges.
     for (; i < len; ++i) {
         const float tap = taps[i];
         acc_re += x[2U * i + 0U] * tap;
@@ -391,15 +397,6 @@ template <typename MulAccumulate>
     }
 
     return {acc_re, acc_im};
-}
-
-} // namespace
-
-std::complex<float> DotProdCF32Real_avx2(const void* src, const float* taps, size_t len) noexcept {
-    if (!src || !taps || len == 0U) {
-        return {};
-    }
-    return dotprod_cf32real_avx2_impl(static_cast<const float*>(src), taps, len, mul_accumulate_ps_avx2);
 }
 
 
@@ -411,6 +408,8 @@ std::complex<float> DotProdSymmetricCF32Real_avx2(const void* src, const float* 
 
     const auto* x = static_cast<const float*>(src);
     const size_t center_off = 2U * pair_count;
+
+    // Seed the result with the center sample, which has no mirrored partner.
     out.real(x[center_off + 0U] * center_tap);
     out.imag(x[center_off + 1U] * center_tap);
 
@@ -423,6 +422,7 @@ std::complex<float> DotProdSymmetricCF32Real_avx2(const void* src, const float* 
     __m256 acc = _mm256_setzero_ps();
     size_t k = 0;
 
+    // Reverse the right side, add mirrored samples, then apply one real tap per complex pair.
     for (; k + 4U <= pair_count; k += 4U) {
         const __m256 left = _mm256_loadu_ps(x + 2U * k);
         __m256 right = _mm256_loadu_ps(x + (tail_off - (2U * k + 6U)));
@@ -432,10 +432,14 @@ std::complex<float> DotProdSymmetricCF32Real_avx2(const void* src, const float* 
         acc = _mm256_add_ps(acc, _mm256_mul_ps(pair_sum, tv));
     }
 
-    const std::complex<float> vec_acc = reduce_complex_acc_avx2(acc);
-    out.real(out.real() + vec_acc.real());
-    out.imag(out.imag() + vec_acc.imag());
+    // Fold the four accumulated complex pairs into the seeded center result.
+    const __m128 lane_sum = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+    const __m128 complex_sum = _mm_add_ps(lane_sum, _mm_movehl_ps(lane_sum, lane_sum));
+    out.real(out.real() + _mm_cvtss_f32(complex_sum));
+    out.imag(out.imag() +
+             _mm_cvtss_f32(_mm_shuffle_ps(complex_sum, complex_sum, _MM_SHUFFLE(1, 1, 1, 1))));
 
+    // Finish mirrored pairs that do not fill a complete SIMD vector.
     for (; k < pair_count; ++k) {
         const float tap = taps_pairs[k];
         const size_t lo = 2U * k;

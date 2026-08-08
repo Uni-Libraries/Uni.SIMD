@@ -21,6 +21,7 @@
 
 namespace {
 [[nodiscard]] inline __m256 duplicate_real_taps4_avx2(const float* taps) noexcept {
+    // Match four real taps to the interleaved {real, imag} components of four complex samples.
     const __m128 t = _mm_loadu_ps(taps);
     const __m128 lo = _mm_unpacklo_ps(t, t);
     const __m128 hi = _mm_unpackhi_ps(t, t);
@@ -29,11 +30,6 @@ namespace {
     return out;
 }
 
-[[nodiscard]] inline std::complex<float> reduce_complex_acc_avx2(__m256 acc) noexcept {
-    alignas(32) float tmp[8];
-    _mm256_store_ps(tmp, acc);
-    return {tmp[0] + tmp[2] + tmp[4] + tmp[6], tmp[1] + tmp[3] + tmp[5] + tmp[7]};
-}
 } // namespace
 
 namespace uni::simd::detail {
@@ -46,6 +42,8 @@ std::complex<float> DotProdSymmetricCF32Real_avx2fma(const void* src, const floa
 
     const auto* x = static_cast<const float*>(src);
     const size_t center_off = 2U * pair_count;
+
+    // Seed the result with the center sample, which has no mirrored partner.
     out.real(x[center_off + 0U] * center_tap);
     out.imag(x[center_off + 1U] * center_tap);
 
@@ -59,6 +57,7 @@ std::complex<float> DotProdSymmetricCF32Real_avx2fma(const void* src, const floa
     __m256 acc1 = _mm256_setzero_ps();
     size_t k = 0;
 
+    // Accumulate mirrored pairs through two independent FMA chains to hide instruction latency.
     for (; k + 8U <= pair_count; k += 8U) {
         const __m256 left0 = _mm256_loadu_ps(x + 2U * k);
         __m256 right0 = _mm256_loadu_ps(x + (tail_off - (2U * k + 6U)));
@@ -75,6 +74,7 @@ std::complex<float> DotProdSymmetricCF32Real_avx2fma(const void* src, const floa
         acc1 = _mm256_fmadd_ps(pair_sum1, tv1, acc1);
     }
 
+    // Consume a final complete four-pair vector before the scalar tail.
     for (; k + 4U <= pair_count; k += 4U) {
         const __m256 left = _mm256_loadu_ps(x + 2U * k);
         __m256 right = _mm256_loadu_ps(x + (tail_off - (2U * k + 6U)));
@@ -84,10 +84,16 @@ std::complex<float> DotProdSymmetricCF32Real_avx2fma(const void* src, const floa
         acc0 = _mm256_fmadd_ps(pair_sum, tv, acc0);
     }
 
-    const std::complex<float> vec_acc = reduce_complex_acc_avx2(_mm256_add_ps(acc0, acc1));
-    out.real(out.real() + vec_acc.real());
-    out.imag(out.imag() + vec_acc.imag());
+    // Fold the interleaved SIMD lanes into the seeded center result.
+    const __m256 vec_acc = _mm256_add_ps(acc0, acc1);
+    const __m128 lane_sum =
+        _mm_add_ps(_mm256_castps256_ps128(vec_acc), _mm256_extractf128_ps(vec_acc, 1));
+    const __m128 complex_sum = _mm_add_ps(lane_sum, _mm_movehl_ps(lane_sum, lane_sum));
+    out.real(out.real() + _mm_cvtss_f32(complex_sum));
+    out.imag(out.imag() +
+             _mm_cvtss_f32(_mm_shuffle_ps(complex_sum, complex_sum, _MM_SHUFFLE(1, 1, 1, 1))));
 
+    // Finish mirrored pairs that do not fill a complete SIMD vector.
     for (; k < pair_count; ++k) {
         const float tap = taps_pairs[k];
         const size_t lo = 2U * k;
