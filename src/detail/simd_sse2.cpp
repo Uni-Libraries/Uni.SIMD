@@ -2,10 +2,6 @@
 // Includes
 //
 
-// stdlib
-#include <array>
-#include <cstring>
-
 // compiler
 #include <emmintrin.h>
 
@@ -141,96 +137,38 @@ void Pack8_LSB_sse2(void* dst, const void* src, size_t len) {
 // Unpack8_LSB
 //
 
-// 256-entry LUT: each entry is 8 bytes (0/1) packed into a uint64.
-// Byte k (0..7) of lut[b] == (b>>k)&1.
-alignas(64) inline constexpr std::array<std::uint64_t, 256> kUnpack8_LSBLut = [] {
-    std::array<std::uint64_t, 256> t{};
-    for (int b = 0; b < 256; ++b) {
-        std::uint64_t x = 0;
-        for (int k = 0; k < 8; ++k) {
-            x |= static_cast<std::uint64_t>((b >> k) & 1u) << (k * 8);
-        }
-        t[static_cast<std::size_t>(b)] = x;
-    }
-    return t;
-}();
-
-alignas(64) inline constexpr std::array<std::uint64_t, 256> kUnpack8_MSBLut = [] {
-    std::array<std::uint64_t, 256> t{};
-    for (int b = 0; b < 256; ++b) {
-        std::uint64_t x = 0;
-        for (int k = 0; k < 8; ++k) {
-            x |= static_cast<std::uint64_t>((b >> (7 - k)) & 1u) << (k * 8);
-        }
-        t[static_cast<std::size_t>(b)] = x;
-    }
-    return t;
-}();
-
-static inline __m128i lut2_to_xmm(uint8_t b0, uint8_t b1) {
-    // safe bit-cast via set_epi64x (no aliasing concerns)
-    const std::uint64_t lo = kUnpack8_LSBLut[b0];
-    const std::uint64_t hi = kUnpack8_LSBLut[b1];
-    return _mm_set_epi64x(static_cast<long long>(hi), static_cast<long long>(lo));
-}
-
-static inline __m128i lut2_to_xmm_msb(uint8_t b0, uint8_t b1) {
-    const std::uint64_t lo = kUnpack8_MSBLut[b0];
-    const std::uint64_t hi = kUnpack8_MSBLut[b1];
-    return _mm_set_epi64x(static_cast<long long>(hi), static_cast<long long>(lo));
-}
-
 void Unpack8_LSB_sse2(void* dst, const void* src, size_t len) {
-    std::size_t i = 0;
-
     auto* dst8 = static_cast<uint8_t*>(dst);
     const auto* src8 = static_cast<const uint8_t*>(src);
 
-    // If dst is 16B-aligned, then dst + (i*8) is 16B-aligned for even i.
-    if ((reinterpret_cast<uintptr_t>(dst) & 15u) == 0) {
-        // Unroll by 8 input bytes -> 64 output bytes (4 aligned stores)
-        for (; i + 8 <= len; i += 8) {
-            __m128i v0 = lut2_to_xmm(src8[i + 0], src8[i + 1]);
-            __m128i v1 = lut2_to_xmm(src8[i + 2], src8[i + 3]);
-            __m128i v2 = lut2_to_xmm(src8[i + 4], src8[i + 5]);
-            __m128i v3 = lut2_to_xmm(src8[i + 6], src8[i + 7]);
+    const __m128i bit_masks = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, static_cast<char>(128),
+                                            1, 2, 4, 8, 16, 32, 64, static_cast<char>(128));
+    const __m128i ones = _mm_set1_epi8(1);
+    size_t i = 0;
 
-            _mm_store_si128((__m128i*)(dst8 + (i + 0) * 8), v0);
-            _mm_store_si128((__m128i*)(dst8 + (i + 2) * 8), v1);
-            _mm_store_si128((__m128i*)(dst8 + (i + 4) * 8), v2);
-            _mm_store_si128((__m128i*)(dst8 + (i + 6) * 8), v3);
-        }
+    for (; i + 8 <= len; i += 8) {
+        const __m128i bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src8 + i));
+        const __m128i pairs = _mm_unpacklo_epi8(bytes, bytes);
+        const __m128i low_quads = _mm_unpacklo_epi16(pairs, pairs);
+        const __m128i high_quads = _mm_unpackhi_epi16(pairs, pairs);
 
-        // Remaining pairs
-        for (; i + 2 <= len; i += 2) {
-            __m128i v = lut2_to_xmm(src8[i], src8[i + 1]);
-            _mm_store_si128((__m128i*)(dst8 + i * 8), v);
-        }
-    } else {
-        // Unaligned stores
-        for (; i + 8 <= len; i += 8) {
-            const __m128i v0 = lut2_to_xmm(src8[i + 0], src8[i + 1]);
-            const __m128i v1 = lut2_to_xmm(src8[i + 2], src8[i + 3]);
-            const __m128i v2 = lut2_to_xmm(src8[i + 4], src8[i + 5]);
-            const __m128i v3 = lut2_to_xmm(src8[i + 6], src8[i + 7]);
+        __m128i out0 = _mm_unpacklo_epi32(low_quads, low_quads);
+        __m128i out1 = _mm_unpackhi_epi32(low_quads, low_quads);
+        __m128i out2 = _mm_unpacklo_epi32(high_quads, high_quads);
+        __m128i out3 = _mm_unpackhi_epi32(high_quads, high_quads);
 
-            _mm_storeu_si128((__m128i*)(dst8 + (i + 0) * 8), v0);
-            _mm_storeu_si128((__m128i*)(dst8 + (i + 2) * 8), v1);
-            _mm_storeu_si128((__m128i*)(dst8 + (i + 4) * 8), v2);
-            _mm_storeu_si128((__m128i*)(dst8 + (i + 6) * 8), v3);
-        }
-        for (; i + 2 <= len; i += 2) {
-            const __m128i v = lut2_to_xmm(src8[i], src8[i + 1]);
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8), v);
-        }
+        out0 = _mm_min_epu8(_mm_and_si128(out0, bit_masks), ones);
+        out1 = _mm_min_epu8(_mm_and_si128(out1, bit_masks), ones);
+        out2 = _mm_min_epu8(_mm_and_si128(out2, bit_masks), ones);
+        out3 = _mm_min_epu8(_mm_and_si128(out3, bit_masks), ones);
+
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 0), out0);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 16), out1);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 32), out2);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 48), out3);
     }
 
-    // Tail (0 or 1 byte left)
-    if (i < len) {
-        std::uint64_t x = kUnpack8_LSBLut[src8[i]];
-        std::memcpy(dst8 + i * 8, &x, 8);
-        ++i;
-    }
+    Unpack8_LSB_generic(dst8 + i * 8, src8 + i, len - i);
 }
 
 //
