@@ -10,6 +10,7 @@
 #include <complex>
 #include <cstdint>
 #include <limits>
+#include <span>
 
 int main() {
     using uni::simd::Backend;
@@ -80,9 +81,12 @@ int main() {
     std::array<std::uint8_t, 34U> vector_soft_reference{};
     std::array<float, 17U> vector_power_reference{};
     std::complex<float> vector_dot_reference{};
+    std::complex<float> vector_symmetric_dot_reference{};
     assert(generic.quantize_interleaved_cf32_u8(vector_soft_reference, vector_symbols, {.scale = -7.0f}) == Result::success);
     assert(generic.magnitude_squared(vector_power_reference, vector_symbols, 3.0f) == Result::success);
     assert(generic.dot_cf32_f32(vector_dot_reference, vector_symbols, vector_taps) == Result::success);
+    assert(generic.dot_symmetric_cf32_f32(vector_symmetric_dot_reference, vector_symbols,
+                                          std::span<const float>{vector_taps}.first(8U), 0.25f) == Result::success);
 
     for (const auto backend : {Backend::generic, Backend::sse2, Backend::avx2, Backend::avx2_fma, Backend::avx512}) {
         const auto forced = uni::simd::create_context({.backend = backend});
@@ -106,6 +110,7 @@ int main() {
         std::array<std::uint8_t, 34U> backend_soft{};
         std::array<float, 17U> backend_power{};
         std::complex<float> backend_dot{};
+        std::complex<float> backend_symmetric_dot{};
         assert(forced->pack_bits_lsb(backend_packed, vector_bits) == Result::success);
         assert(backend_packed == vector_packed);
         assert(forced->unpack_bits_lsb(backend_unpacked, backend_packed) == Result::success);
@@ -119,6 +124,10 @@ int main() {
         assert(forced->dot_cf32_f32(backend_dot, vector_symbols, vector_taps) == Result::success);
         assert(std::abs(backend_dot.real() - vector_dot_reference.real()) < 1.0e-4f);
         assert(std::abs(backend_dot.imag() - vector_dot_reference.imag()) < 1.0e-4f);
+        assert(forced->dot_symmetric_cf32_f32(backend_symmetric_dot, vector_symbols,
+                                              std::span<const float>{vector_taps}.first(8U), 0.25f) == Result::success);
+        assert(std::abs(backend_symmetric_dot.real() - vector_symmetric_dot_reference.real()) < 1.0e-4f);
+        assert(std::abs(backend_symmetric_dot.imag() - vector_symmetric_dot_reference.imag()) < 1.0e-4f);
     }
 
     constexpr std::array<std::complex<float>, 1U> exceptional{{{std::numeric_limits<float>::quiet_NaN(),

@@ -257,8 +257,32 @@ std::complex<float> DotProdSymmetricCF32Real_generic(const void* src, const floa
     const size_t center_off = 2U * pair_count;
     float acc_re = x[center_off + 0U] * center_tap;
     float acc_im = x[center_off + 1U] * center_tap;
+    float pair_re0 = 0.0f;
+    float pair_im0 = 0.0f;
+    float pair_re1 = 0.0f;
+    float pair_im1 = 0.0f;
+    float pair_re2 = 0.0f;
+    float pair_im2 = 0.0f;
+    float pair_re3 = 0.0f;
+    float pair_im3 = 0.0f;
+    size_t k = 0;
 
-    for (size_t k = 0; k < pair_count; ++k) {
+    for (; k + 4U <= pair_count; k += 4U) {
+        const size_t hi = 4U * pair_count - 2U * k;
+        pair_re0 += taps_pairs[k + 0U] * (x[2U * k + 0U] + x[hi + 0U]);
+        pair_im0 += taps_pairs[k + 0U] * (x[2U * k + 1U] + x[hi + 1U]);
+        pair_re1 += taps_pairs[k + 1U] * (x[2U * k + 2U] + x[hi - 2U]);
+        pair_im1 += taps_pairs[k + 1U] * (x[2U * k + 3U] + x[hi - 1U]);
+        pair_re2 += taps_pairs[k + 2U] * (x[2U * k + 4U] + x[hi - 4U]);
+        pair_im2 += taps_pairs[k + 2U] * (x[2U * k + 5U] + x[hi - 3U]);
+        pair_re3 += taps_pairs[k + 3U] * (x[2U * k + 6U] + x[hi - 6U]);
+        pair_im3 += taps_pairs[k + 3U] * (x[2U * k + 7U] + x[hi - 5U]);
+    }
+
+    acc_re += ((pair_re0 + pair_re1) + pair_re2) + pair_re3;
+    acc_im += ((pair_im0 + pair_im1) + pair_im2) + pair_im3;
+
+    for (; k < pair_count; ++k) {
         const float tap = taps_pairs[k];
         const size_t lo = 2U * k;
         const size_t hi = 4U * pair_count - 2U * k;
