@@ -180,10 +180,10 @@ void verify_complex(const std::complex<float> expected, const std::complex<float
     }
 }
 
-[[nodiscard]] std::string table_border(const std::span<const std::size_t> widths) {
+[[nodiscard]] std::string table_border(const std::span<const std::size_t> widths, const char fill = '-') {
     std::string border{"+"};
     for (const std::size_t width : widths) {
-        border += std::string(width + 2U, '-');
+        border += std::string(width + 2U, fill);
         border += '+';
     }
     return border;
@@ -234,7 +234,7 @@ public:
         fmt::print("\n{}\n| {:^{}} |\n{}\n", frame, title, frame.size() - 4U, border);
         fmt::print("| {:<34} | {:<12} | {:>14} | {:>14} | {:>18} |\n", "kernel", "backend", "ns/item",
                    "GiB/s", "checksum");
-        fmt::print("{}\n", border);
+        fmt::print("{}\n", table_border(widths, '='));
     }
 
     static void print_footer() {
@@ -247,6 +247,7 @@ public:
              const double bytes_per_iteration, Operation&& operation, Validator&& validator,
              Checksum&& checksum_function) const {
         std::array<bool, kBackendSlots> measured_backends{};
+        bool group_started = false;
         for (const auto requested_backend : kCandidateBackends) {
             const auto context = uni::simd::create_context({.backend = requested_backend});
             if (!context.has_value()) {
@@ -260,6 +261,10 @@ public:
             }
             measured_backends[backend_index] = true;
 
+            if (!group_started) {
+                begin_group();
+                group_started = true;
+            }
             require_success(operation(*context));
             validator();
             const Statistics statistics = measure(
@@ -271,6 +276,7 @@ public:
     template <typename Operation, typename Validator, typename Checksum>
     void run_runtime(const std::string_view name, const std::size_t item_count, const double bytes_per_iteration,
                      Operation&& operation, Validator&& validator, Checksum&& checksum_function) const {
+        begin_group();
         require_success(operation());
         validator();
         const Statistics statistics = measure(config_, item_count, bytes_per_iteration, operation, checksum_function);
@@ -278,6 +284,14 @@ public:
     }
 
 private:
+    void begin_group() const {
+        if (has_rows_) {
+            constexpr std::array<std::size_t, 5U> widths{34U, 12U, 14U, 14U, 18U};
+            fmt::print("{}\n", table_border(widths));
+        }
+        has_rows_ = true;
+    }
+
     static void print_row(const std::string_view name, const std::string_view backend,
                           const Statistics& statistics) {
         fmt::print("| {:<34} | {:<12} | {:>14.3f} | {:>14.2f} | {:>18.3f} |\n", name, backend,
@@ -285,6 +299,7 @@ private:
     }
 
     const Config& config_;
+    mutable bool has_rows_ = false;
 };
 
 void fill_inputs(std::vector<std::uint8_t>& bytes, std::vector<std::uint8_t>& bits,
