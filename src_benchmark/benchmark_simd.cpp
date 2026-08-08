@@ -26,6 +26,22 @@ namespace {
 using Clock = std::chrono::steady_clock;
 namespace topology = uni::simd::benchmark::cpu_topology;
 
+#if defined(__clang__) || defined(__GNUC__)
+constexpr bool kOptimizedBuild =
+#if defined(__OPTIMIZE__)
+    true;
+#else
+    false;
+#endif
+#else
+constexpr bool kOptimizedBuild =
+#if defined(NDEBUG)
+    true;
+#else
+    false;
+#endif
+#endif
+
 constexpr std::array kCandidateBackends{
     uni::simd::Backend::generic,
     uni::simd::Backend::sse2,
@@ -225,20 +241,20 @@ public:
 
     void print_header(const topology::CoreClass& core_class, const std::size_t class_index,
                       const std::size_t class_count) const {
-        constexpr std::array<std::size_t, 5U> widths{34U, 12U, 14U, 14U, 18U};
+        constexpr std::array<std::size_t, 6U> widths{34U, 12U, 14U, 14U, 12U, 18U};
         const std::string border = table_border(widths);
         const std::string frame = outer_border(border);
         const std::string title = fmt::format("RESULTS {}/{}: {} (pinned to cpu{})", class_index + 1U, class_count,
                                               core_type_name(core_class),
                                               core_class.logical_processor.logical_processor_id);
         fmt::print("\n{}\n| {:^{}} |\n{}\n", frame, title, frame.size() - 4U, border);
-        fmt::print("| {:<34} | {:<12} | {:>14} | {:>14} | {:>18} |\n", "kernel", "backend", "ns/item",
-                   "GiB/s", "checksum");
+        fmt::print("| {:<34} | {:<12} | {:>14} | {:>14} | {:>12} | {:>18} |\n", "kernel", "backend", "ns/item",
+                   "GiB/s", "vs generic", "checksum");
         fmt::print("{}\n", table_border(widths, '='));
     }
 
     static void print_footer() {
-        constexpr std::array<std::size_t, 5U> widths{34U, 12U, 14U, 14U, 18U};
+        constexpr std::array<std::size_t, 6U> widths{34U, 12U, 14U, 14U, 12U, 18U};
         fmt::print("{}\n", table_border(widths));
     }
 
@@ -247,6 +263,7 @@ public:
              const double bytes_per_iteration, Operation&& operation, Validator&& validator,
              Checksum&& checksum_function) const {
         std::array<bool, kBackendSlots> measured_backends{};
+        std::optional<double> generic_nanoseconds_per_item;
         bool group_started = false;
         for (const auto requested_backend : kCandidateBackends) {
             const auto context = uni::simd::create_context({.backend = requested_backend});
@@ -269,7 +286,14 @@ public:
             validator();
             const Statistics statistics = measure(
                 config_, item_count, bytes_per_iteration, [&] { return operation(*context); }, checksum_function);
-            print_row(name, uni::simd::backend_name(backend), statistics);
+            if (backend == uni::simd::Backend::generic) {
+                generic_nanoseconds_per_item = statistics.nanoseconds_per_item;
+            }
+            std::optional<double> speedup;
+            if (generic_nanoseconds_per_item.has_value()) {
+                speedup = *generic_nanoseconds_per_item / statistics.nanoseconds_per_item;
+            }
+            print_row(name, uni::simd::backend_name(backend), statistics, speedup);
         }
     }
 
@@ -280,22 +304,24 @@ public:
         require_success(operation());
         validator();
         const Statistics statistics = measure(config_, item_count, bytes_per_iteration, operation, checksum_function);
-        print_row(name, "runtime", statistics);
+        print_row(name, "runtime", statistics, std::nullopt);
     }
 
 private:
     void begin_group() const {
         if (has_rows_) {
-            constexpr std::array<std::size_t, 5U> widths{34U, 12U, 14U, 14U, 18U};
+            constexpr std::array<std::size_t, 6U> widths{34U, 12U, 14U, 14U, 12U, 18U};
             fmt::print("{}\n", table_border(widths));
         }
         has_rows_ = true;
     }
 
     static void print_row(const std::string_view name, const std::string_view backend,
-                          const Statistics& statistics) {
-        fmt::print("| {:<34} | {:<12} | {:>14.3f} | {:>14.2f} | {:>18.3f} |\n", name, backend,
-                   statistics.nanoseconds_per_item, statistics.gibibytes_per_second, statistics.checksum);
+                           const Statistics& statistics, const std::optional<double> speedup) {
+        const std::string speedup_text = speedup.has_value() ? fmt::format("{:.2f}x", *speedup) : "-";
+        fmt::print("| {:<34} | {:<12} | {:>14.3f} | {:>14.2f} | {:>12} | {:>18.3f} |\n", name, backend,
+                   statistics.nanoseconds_per_item, statistics.gibibytes_per_second, speedup_text,
+                   statistics.checksum);
     }
 
     const Config& config_;
@@ -573,6 +599,10 @@ int main(const int argc, char** argv) {
     }
     if (parse_result == ParseResult::error) {
         print_usage(argv[0]);
+        return 2;
+    }
+    if (!kOptimizedBuild) {
+        std::cerr << "Benchmark requires an optimized build; configure with -DCMAKE_BUILD_TYPE=Release\n";
         return 2;
     }
 
