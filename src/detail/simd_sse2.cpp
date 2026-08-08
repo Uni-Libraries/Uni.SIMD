@@ -2,6 +2,9 @@
 // Includes
 //
 
+// stdlib
+#include <cstdint>
+
 // compiler
 #include <emmintrin.h>
 

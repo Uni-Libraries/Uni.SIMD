@@ -3,6 +3,7 @@
 //
 
 // stdlib
+#include <cstdint>
 #include <cstring>
 
 #include "detail/simd_generic.h"
