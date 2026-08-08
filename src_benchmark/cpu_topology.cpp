@@ -35,6 +35,7 @@
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#include <powrprof.h>
 #endif
 
 namespace uni::simd::benchmark::cpu_topology {
@@ -215,6 +216,105 @@ void fill_aggregate_fields(Snapshot& snapshot) {
     return std::string(trim(brand.data()));
 }
 
+[[nodiscard]] std::string x86_vendor() {
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    const auto registers = cpuid(0U, 0U);
+    std::array<char, 13U> vendor{};
+    std::memcpy(vendor.data(), &registers[1], sizeof(std::uint32_t));
+    std::memcpy(vendor.data() + 4U, &registers[3], sizeof(std::uint32_t));
+    std::memcpy(vendor.data() + 8U, &registers[2], sizeof(std::uint32_t));
+    return vendor.data();
+#else
+    return {};
+#endif
+}
+
+struct AmdFamilyModel {
+    std::uint32_t family;
+    std::uint32_t model;
+};
+
+[[nodiscard]] std::optional<AmdFamilyModel> amd_family_model() {
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    if (x86_vendor() != "AuthenticAMD" || cpuid(0x80000000U, 0U)[0] < 0x80000001U) {
+        return std::nullopt;
+    }
+    const std::uint32_t eax = cpuid(0x80000001U, 0U)[0];
+    const std::uint32_t base_family = (eax >> 8U) & 0xfU;
+    const std::uint32_t base_model = (eax >> 4U) & 0xfU;
+    const std::uint32_t family = base_family == 0xfU ? base_family + ((eax >> 20U) & 0xffU) : base_family;
+    const std::uint32_t model = (base_family == 0x6U || base_family == 0xfU)
+                                    ? base_model + (((eax >> 16U) & 0xfU) << 4U)
+                                    : base_model;
+    return AmdFamilyModel{family, model};
+#else
+    return std::nullopt;
+#endif
+}
+
+[[nodiscard]] std::string amd_generation() {
+    const auto cpu = amd_family_model();
+    if (!cpu.has_value()) {
+        return "zenx";
+    }
+
+    const auto in_range = [model = cpu->model](const std::uint32_t first, const std::uint32_t last) {
+        return model >= first && model <= last;
+    };
+    switch (cpu->family) {
+    case 0x17U:
+        if (in_range(0x00U, 0x2fU) || in_range(0x50U, 0x5fU)) {
+            return "zen1";
+        }
+        if (in_range(0x30U, 0x4fU) || in_range(0x60U, 0x7fU) || in_range(0x90U, 0x91U) ||
+            in_range(0xa0U, 0xafU)) {
+            return "zen2";
+        }
+        break;
+    case 0x19U:
+        if (in_range(0x00U, 0x0fU) || in_range(0x20U, 0x5fU)) {
+            return "zen3";
+        }
+        if (in_range(0x10U, 0x1fU) || in_range(0x60U, 0xafU)) {
+            return "zen4";
+        }
+        break;
+    case 0x1aU:
+        if (in_range(0x00U, 0x2fU) || in_range(0x40U, 0x4fU) || in_range(0x60U, 0x7fU) ||
+            in_range(0xd0U, 0xd7U)) {
+            return "zen5";
+        }
+        if (in_range(0x50U, 0x5fU) || in_range(0x80U, 0xafU) || in_range(0xc0U, 0xcfU) ||
+            in_range(0xd8U, 0xefU)) {
+            return "zen6";
+        }
+        break;
+    default:
+        break;
+    }
+    return "zenx";
+}
+
+[[nodiscard]] std::uint64_t amd_rank(const std::uint64_t l3_bytes, const std::uint64_t max_frequency_khz) {
+    constexpr std::uint64_t frequency_bits = 20U;
+    return ((l3_bytes / (1024ULL * 1024ULL)) << frequency_bits) |
+           ((max_frequency_khz / 1000ULL) & ((1ULL << frequency_bits) - 1ULL));
+}
+
+void classify_amd(Snapshot& snapshot) {
+    const std::string generation = amd_generation();
+    for (auto& processor : snapshot.logical_processors) {
+        const std::string tier = processor.l3_cache_bytes > 0U &&
+                                         processor.l3_cache_bytes < 16ULL * 1024ULL * 1024ULL
+                                     ? generation + "c"
+                                     : generation;
+        processor.performance_rank = amd_rank(processor.l3_cache_bytes, processor.max_frequency_khz);
+        processor.performance_class_key = "amd_" + tier + "_l3" + std::to_string(processor.l3_cache_bytes) +
+                                          "_f" + std::to_string(processor.max_frequency_khz);
+        processor.performance_class_label = tier + "@cpu" + std::to_string(processor.logical_processor_id);
+    }
+}
+
 #if defined(__linux__)
 
 [[nodiscard]] std::filesystem::path cpu_path(const int cpu, const std::string_view suffix) {
@@ -319,19 +419,6 @@ void fill_aggregate_fields(Snapshot& snapshot) {
     return std::nullopt;
 }
 
-[[nodiscard]] std::string x86_vendor() {
-#if defined(__i386__) || defined(__x86_64__)
-    const auto registers = cpuid(0U, 0U);
-    std::array<char, 13U> vendor{};
-    std::memcpy(vendor.data(), &registers[1], sizeof(std::uint32_t));
-    std::memcpy(vendor.data() + 4U, &registers[3], sizeof(std::uint32_t));
-    std::memcpy(vendor.data() + 8U, &registers[2], sizeof(std::uint32_t));
-    return vendor.data();
-#else
-    return {};
-#endif
-}
-
 [[nodiscard]] std::string cpu_model_linux() {
     std::ifstream input("/proc/cpuinfo");
     std::string line;
@@ -386,52 +473,6 @@ struct ScopedCpuPinLinux {
 #endif
 }
 
-struct AmdFamilyModel {
-    std::uint32_t family;
-    std::uint32_t model;
-};
-
-[[nodiscard]] std::optional<AmdFamilyModel> amd_family_model() {
-#if defined(__i386__) || defined(__x86_64__)
-    if (x86_vendor() != "AuthenticAMD" || cpuid(0x80000000U, 0U)[0] < 0x80000001U) {
-        return std::nullopt;
-    }
-    const std::uint32_t eax = cpuid(0x80000001U, 0U)[0];
-    const std::uint32_t base_family = (eax >> 8U) & 0xfU;
-    const std::uint32_t base_model = (eax >> 4U) & 0xfU;
-    const std::uint32_t family = base_family == 0xfU ? base_family + ((eax >> 20U) & 0xffU) : base_family;
-    const std::uint32_t model = (base_family == 0x6U || base_family == 0xfU)
-                                    ? base_model + (((eax >> 16U) & 0xfU) << 4U)
-                                    : base_model;
-    return AmdFamilyModel{family, model};
-#else
-    return std::nullopt;
-#endif
-}
-
-[[nodiscard]] std::string amd_generation() {
-    const auto cpu = amd_family_model();
-    if (!cpu.has_value()) {
-        return "zenx";
-    }
-    if (cpu->family == 0x1aU) {
-        return "zen5";
-    }
-    if (cpu->family == 0x19U) {
-        return cpu->model >= 0x60U ? "zen4" : "zen3";
-    }
-    if (cpu->family == 0x17U) {
-        return cpu->model >= 0x30U ? "zen2" : "zen1";
-    }
-    return "zenx";
-}
-
-[[nodiscard]] std::uint64_t amd_rank(const std::uint64_t l3_bytes, const std::uint64_t max_frequency_khz) {
-    constexpr std::uint64_t frequency_bits = 20U;
-    return ((l3_bytes / (1024ULL * 1024ULL)) << frequency_bits) |
-           ((max_frequency_khz / 1000ULL) & ((1ULL << frequency_bits) - 1ULL));
-}
-
 void classify_linux(Snapshot& snapshot) {
     const std::string vendor = x86_vendor();
     if (vendor == "GenuineIntel") {
@@ -455,25 +496,12 @@ void classify_linux(Snapshot& snapshot) {
         }
     }
 
-    const bool is_amd = vendor == "AuthenticAMD";
-    const std::string generation = is_amd ? amd_generation() : "zenx";
+    if (vendor == "AuthenticAMD") {
+        classify_amd(snapshot);
+        return;
+    }
     for (auto& processor : snapshot.logical_processors) {
-        if (is_amd && processor.l3_cache_bytes > 0U) {
-            const std::string tier = processor.l3_cache_bytes >= 16ULL * 1024ULL * 1024ULL
-                                         ? generation
-                                         : generation + "c";
-            processor.performance_rank = amd_rank(processor.l3_cache_bytes, processor.max_frequency_khz);
-            processor.performance_class_key = "amd_" + tier + "_l3" + std::to_string(processor.l3_cache_bytes) +
-                                              "_f" + std::to_string(processor.max_frequency_khz);
-            processor.performance_class_label = tier + "@cpu" + std::to_string(processor.logical_processor_id) + " (" +
-                                                decimal_label(static_cast<double>(processor.l3_cache_bytes) /
-                                                                  (1024.0 * 1024.0),
-                                                              1) +
-                                                "MiB/" + decimal_label(static_cast<double>(processor.max_frequency_khz) /
-                                                                           1'000'000.0,
-                                                                       2) +
-                                                "GHz)";
-        } else if (processor.max_frequency_khz > 0U) {
+        if (processor.max_frequency_khz > 0U) {
             processor.performance_rank = processor.max_frequency_khz;
             processor.performance_class_key = "max_freq_" + std::to_string(processor.max_frequency_khz);
             processor.performance_class_label = decimal_label(
@@ -525,6 +553,15 @@ void classify_linux(Snapshot& snapshot) {
 #endif // __linux__
 
 #if defined(_WIN32)
+
+struct WindowsProcessorPowerInformation {
+    ULONG number;
+    ULONG max_mhz;
+    ULONG current_mhz;
+    ULONG mhz_limit;
+    ULONG max_idle_state;
+    ULONG current_idle_state;
+};
 
 template <typename Function>
 void for_each_set_bit(const std::uint64_t mask, Function&& function) {
@@ -642,6 +679,21 @@ void for_each_set_bit(const std::uint64_t mask, Function&& function) {
         if (processor.package_id < 0) {
             processor.package_id = 0;
         }
+    }
+    std::vector<WindowsProcessorPowerInformation> power_information(result.snapshot.logical_processors.size());
+    if (!power_information.empty() &&
+        CallNtPowerInformation(ProcessorInformation, nullptr, 0U, power_information.data(),
+                               static_cast<ULONG>(power_information.size() * sizeof(WindowsProcessorPowerInformation))) ==
+            ERROR_SUCCESS) {
+        for (const auto& frequency : power_information) {
+            if (frequency.number < result.snapshot.logical_processors.size()) {
+                result.snapshot.logical_processors[frequency.number].max_frequency_khz =
+                    static_cast<std::uint64_t>(frequency.max_mhz) * 1000ULL;
+            }
+        }
+    }
+    if (x86_vendor() == "AuthenticAMD") {
+        classify_amd(result.snapshot);
     }
     fill_aggregate_fields(result.snapshot);
     result.status.code = result.snapshot.has_numa_mapping ? StatusCode::ok : StatusCode::partial;
