@@ -1,0 +1,7 @@
+#pragma once
+
+#define UNI_SIMD_VERSION_MAJOR 0
+#define UNI_SIMD_VERSION_MINOR 1
+#define UNI_SIMD_VERSION_PATCH 0
+#define UNI_SIMD_ABI_VERSION 1
+#define UNI_SIMD_VERSION "0.1.0"

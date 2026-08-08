@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC Release
+            compiler: g++
+            build_type: Release
+            sanitizers: "OFF"
+          - name: Clang Release
+            compiler: clang++
+            build_type: Release
+            sanitizers: "OFF"
+          - name: GCC Sanitizers
+            compiler: g++
+            build_type: Debug
+            sanitizers: "ON"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libfmt-dev ninja-build
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DUNI_SIMD_BUILD_TESTS=ON
+          -DUNI_SIMD_BUILD_BENCHMARKS=ON
+          -DUNI_SIMD_ENABLE_SANITIZERS=${{ matrix.sanitizers }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Benchmark smoke test
+        run: build/src_benchmark/uni_simd_benchmark --samples 4096 --iterations 2 --warmup 1
