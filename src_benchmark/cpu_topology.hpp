@@ -27,6 +27,8 @@ struct LogicalProcessor {
     int package_id = -1;
     int numa_node_id = -1;
     std::uint64_t max_frequency_khz = 0U;
+    std::uint64_t l1_data_cache_bytes = 0U;
+    std::uint64_t l2_cache_bytes = 0U;
     std::uint64_t l3_cache_bytes = 0U;
     std::uint16_t group_id = 0U;
     std::uint8_t group_index = 0U;

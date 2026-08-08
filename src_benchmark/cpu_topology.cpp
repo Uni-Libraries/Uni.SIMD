@@ -254,12 +254,8 @@ void fill_aggregate_fields(Snapshot& snapshot) {
     return intersection.empty() ? allowed : intersection;
 }
 
-[[nodiscard]] std::optional<std::uint64_t> read_l3_bytes_linux(const int cpu) {
-    const auto text = read_first_line(cpu_path(cpu, "/cache/index3/size"));
-    if (!text.has_value()) {
-        return std::nullopt;
-    }
-    std::string_view value = trim(*text);
+[[nodiscard]] std::optional<std::uint64_t> parse_cache_size(std::string_view value) {
+    value = trim(value);
     if (value.empty()) {
         return std::nullopt;
     }
@@ -280,6 +276,31 @@ void fill_aggregate_fields(Snapshot& snapshot) {
         return std::nullopt;
     }
     return *size * multiplier;
+}
+
+[[nodiscard]] std::uint64_t read_cache_bytes_linux(const int cpu, const int wanted_level,
+                                                    const bool data_only) {
+    const auto cache_path = cpu_path(cpu, "/cache");
+    std::error_code error;
+    for (std::filesystem::directory_iterator iterator(cache_path, error), end; !error && iterator != end;
+         iterator.increment(error)) {
+        if (!iterator->is_directory(error)) {
+            continue;
+        }
+        const auto level = read_integer<int>(iterator->path() / "level");
+        const auto type = read_first_line(iterator->path() / "type");
+        const auto size = read_first_line(iterator->path() / "size");
+        if (!level.has_value() || *level != wanted_level || !type.has_value() || !size.has_value()) {
+            continue;
+        }
+        const std::string_view cache_type = trim(*type);
+        if (data_only ? cache_type != "Data" && cache_type != "Unified"
+                      : cache_type != "Unified" && cache_type != "Data") {
+            continue;
+        }
+        return parse_cache_size(*size).value_or(0U);
+    }
+    return 0U;
 }
 
 [[nodiscard]] std::optional<int> read_numa_node_linux(const int cpu) {
@@ -478,7 +499,9 @@ void classify_linux(Snapshot& snapshot) {
         processor.numa_node_id = read_numa_node_linux(cpu).value_or(kUnknownId);
         processor.max_frequency_khz =
             read_integer<std::uint64_t>(cpu_path(cpu, "/cpufreq/cpuinfo_max_freq")).value_or(0U);
-        processor.l3_cache_bytes = read_l3_bytes_linux(cpu).value_or(0U);
+        processor.l1_data_cache_bytes = read_cache_bytes_linux(cpu, 1, true);
+        processor.l2_cache_bytes = read_cache_bytes_linux(cpu, 2, false);
+        processor.l3_cache_bytes = read_cache_bytes_linux(cpu, 3, false);
         processor.performance_rank = processor.max_frequency_khz;
         processor.performance_class_key = processor.max_frequency_khz == 0U
                                               ? "default"
@@ -587,6 +610,26 @@ void for_each_set_bit(const std::uint64_t mask, Function&& function) {
                 if (found != index_by_group_cpu.end()) {
                     result.snapshot.logical_processors[found->second].numa_node_id =
                         static_cast<int>(entry->NumaNode.NodeNumber);
+                }
+            });
+        } else if (entry->Relationship == RelationCache &&
+                   (entry->Cache.Type == CacheData || entry->Cache.Type == CacheUnified)) {
+            const auto& affinity = entry->Cache.GroupMask;
+            for_each_set_bit(static_cast<std::uint64_t>(affinity.Mask), [&](const std::uint8_t bit) {
+                const auto found = index_by_group_cpu.find({static_cast<std::uint16_t>(affinity.Group), bit});
+                if (found == index_by_group_cpu.end()) {
+                    return;
+                }
+                auto& processor = result.snapshot.logical_processors[found->second];
+                if (entry->Cache.Level == 1U) {
+                    processor.l1_data_cache_bytes = std::max(processor.l1_data_cache_bytes,
+                                                             static_cast<std::uint64_t>(entry->Cache.CacheSize));
+                } else if (entry->Cache.Level == 2U) {
+                    processor.l2_cache_bytes = std::max(processor.l2_cache_bytes,
+                                                        static_cast<std::uint64_t>(entry->Cache.CacheSize));
+                } else if (entry->Cache.Level == 3U) {
+                    processor.l3_cache_bytes = std::max(processor.l3_cache_bytes,
+                                                        static_cast<std::uint64_t>(entry->Cache.CacheSize));
                 }
             });
         }
