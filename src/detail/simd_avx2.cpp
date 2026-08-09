@@ -113,21 +113,30 @@ void Pack8_LSB_avx2(void* dst, const void* src, size_t len) {
 
     const __m256i ones8 = _mm256_set1_epi8(1);
 
-    // Process 4 output bytes at a time: 32 input "bit-bytes" -> movemask -> 32-bit -> store 4 bytes
-    for (; i + 4 <= len; i += 4) {
-        const uint8_t* p = src8 + i * 8; // 32 bytes
-        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+    // Process 8 output bytes through two independent movemask chains.
+    for (; i + 8 <= len; i += 8) {
+        __m256i v0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src8 + (i + 0) * 8));
+        __m256i v1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src8 + (i + 4) * 8));
 
-        // normalize to 0/1
+        v0 = _mm256_and_si256(v0, ones8);
+        v1 = _mm256_and_si256(v1, ones8);
+        v0 = _mm256_slli_epi16(v0, 7);
+        v1 = _mm256_slli_epi16(v1, 7);
+
+        const uint32_t m0 = static_cast<uint32_t>(_mm256_movemask_epi8(v0));
+        const uint32_t m1 = static_cast<uint32_t>(_mm256_movemask_epi8(v1));
+        std::memcpy(dst8 + i + 0, &m0, 4);
+        std::memcpy(dst8 + i + 4, &m1, 4);
+    }
+
+    if (i + 4 <= len) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src8 + i * 8));
         v = _mm256_and_si256(v, ones8);
-
-        // move LSB -> MSB because movemask reads MSB of each byte
         v = _mm256_slli_epi16(v, 7);
 
-        auto m = static_cast<uint32_t>(_mm256_movemask_epi8(v)); // bits correspond to bytes 0..31
-
-        // little-endian store: out[i+0] gets bits 0..7, out[i+1] gets 8..15, etc.
+        const uint32_t m = static_cast<uint32_t>(_mm256_movemask_epi8(v));
         std::memcpy(dst8 + i, &m, 4);
+        i += 4;
     }
 
     // Tail
