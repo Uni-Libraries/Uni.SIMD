@@ -2,7 +2,14 @@ find_package(Threads REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 
 add_executable(uni_simd_benchmark benchmark_simd.cpp cpu_topology.cpp)
-target_link_libraries(uni_simd_benchmark PRIVATE Uni::SIMD Threads::Threads fmt::fmt-header-only)
+target_link_libraries(uni_simd_benchmark PRIVATE Uni::SIMD Threads::Threads)
+
+if(WIN32)
+    target_link_libraries(uni_simd_benchmark PRIVATE fmt::fmt-header-only)
+else()
+    target_link_libraries(uni_simd_benchmark PRIVATE fmt::fmt)
+endif()
+
 if(WIN32)
     target_link_libraries(uni_simd_benchmark PRIVATE PowrProf)
 endif()
