@@ -10,29 +10,47 @@ permissions:
 jobs:
   build:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-26.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: GCC Release
+            runner: ubuntu-26.04
             compiler: g++
             build_type: Release
             sanitizers: "OFF"
           - name: Clang Release
+            runner: ubuntu-26.04
             compiler: clang++
             build_type: Release
             sanitizers: "OFF"
           - name: GCC Sanitizers
+            runner: ubuntu-26.04
             compiler: g++
             build_type: RelWithDebInfo
             sanitizers: "ON"
+          - name: Apple Clang Release (macOS 26)
+            runner: macos-26
+            compiler: clang++
+            build_type: Release
+            sanitizers: "OFF"
+          - name: Apple Clang Release (macOS 26 Intel)
+            runner: macos-26-intel
+            compiler: clang++
+            build_type: Release
+            sanitizers: "OFF"
 
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install dependencies
+      - name: Install dependencies (Ubuntu)
+        if: startsWith(matrix.runner, 'ubuntu-')
         run: sudo apt-get update && sudo apt-get install --yes libfmt-dev ninja-build
+
+      - name: Install dependencies (macOS)
+        if: startsWith(matrix.runner, 'macos-')
+        run: brew install fmt ninja
 
       - name: Configure
         run: >-
