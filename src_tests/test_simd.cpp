@@ -62,14 +62,16 @@ int main() {
     assert(automatic->unpack_bits_msb(automatic_unpacked, packed) == Result::success);
     assert(generic_unpacked == automatic_unpacked);
 
-    std::array<std::uint8_t, 128U> vector_bits{};
+    std::array<std::uint8_t, 232U> vector_bits{};
     for (std::size_t i = 0; i < vector_bits.size(); ++i) {
         vector_bits[i] = static_cast<std::uint8_t>((i * 5U + 1U) & 1U);
     }
-    std::array<std::uint8_t, 16U> vector_packed{};
-    std::array<std::uint8_t, 128U> vector_unpacked{};
+    std::array<std::uint8_t, 29U> vector_packed{};
+    std::array<std::uint8_t, 232U> vector_unpacked{};
+    std::array<std::uint8_t, 232U> vector_msb_unpacked_reference{};
     assert(generic.pack_bits_lsb(vector_packed, vector_bits) == Result::success);
     assert(generic.unpack_bits_lsb(vector_unpacked, vector_packed) == Result::success);
+    assert(generic.unpack_bits_msb(vector_msb_unpacked_reference, vector_packed) == Result::success);
     assert(vector_unpacked == vector_bits);
 
     std::array<std::complex<float>, 17U> vector_symbols{};
@@ -105,8 +107,9 @@ int main() {
         assert(forced_power[0] == 2.0f);
         assert(forced_power[1] == 0.5f);
 
-        std::array<std::uint8_t, 16U> backend_packed{};
-        std::array<std::uint8_t, 128U> backend_unpacked{};
+        std::array<std::uint8_t, 29U> backend_packed{};
+        std::array<std::uint8_t, 232U> backend_unpacked{};
+        std::array<std::uint8_t, 232U> backend_msb_unpacked{};
         std::array<std::uint8_t, 34U> backend_soft{};
         std::array<float, 17U> backend_power{};
         std::complex<float> backend_dot{};
@@ -115,6 +118,8 @@ int main() {
         assert(backend_packed == vector_packed);
         assert(forced->unpack_bits_lsb(backend_unpacked, backend_packed) == Result::success);
         assert(backend_unpacked == vector_bits);
+        assert(forced->unpack_bits_msb(backend_msb_unpacked, backend_packed) == Result::success);
+        assert(backend_msb_unpacked == vector_msb_unpacked_reference);
         assert(forced->quantize_interleaved_cf32_u8(backend_soft, vector_symbols, {.scale = -7.0f}) == Result::success);
         assert(backend_soft == vector_soft_reference);
         assert(forced->magnitude_squared(backend_power, vector_symbols, 3.0f) == Result::success);

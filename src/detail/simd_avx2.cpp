@@ -201,70 +201,88 @@ void Pack8_MSB_avx2(void* dst, const void* src, size_t len) {
 // Unpack8_LSB
 //
 
-void Unpack8_LSB_avx2(void* dst, const void* src, size_t len) {
+namespace {
+
+[[nodiscard]] inline __m256i unpack4_bytes_avx2(const __m256i bytes, const __m256i shuffle,
+                                                const __m256i bitmask, const __m256i ones) noexcept {
+    return _mm256_min_epu8(_mm256_and_si256(_mm256_shuffle_epi8(bytes, shuffle), bitmask), ones);
+}
+
+void unpack8_avx2_impl(void* dst, const void* src, const size_t len, const __m256i bitmask,
+                       const bool msb) noexcept {
     auto* dst8 = static_cast<uint8_t*>(dst);
     const auto* src8 = static_cast<const uint8_t*>(src);
-
     size_t i = 0;
 
-    const __m256i shuf = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3);
-    const __m256i bitmask = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, static_cast<char>(128), 1, 2, 4, 8, 16, 32, 64, static_cast<char>(128), 1, 2, 4, 8, 16, 32,
-                                             64, static_cast<char>(128), 1, 2, 4, 8, 16, 32, 64, static_cast<char>(128));
-    const __m256i zero = _mm256_setzero_si256();
     const __m256i ones = _mm256_set1_epi8(1);
+    const __m256i shuffle0 = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+                                              2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3);
+    const __m256i shuffle1 = _mm256_setr_epi8(4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5,
+                                              6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7);
+    const __m256i shuffle2 = _mm256_setr_epi8(8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9,
+                                              10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11);
+    const __m256i shuffle3 = _mm256_setr_epi8(12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13,
+                                              14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15);
 
-    // 4 input bytes -> 32 output bytes (8 bytes per input byte)
-    for (; i + 4 <= len; i += 4) {
-        uint32_t w;
-        std::memcpy(&w, src8 + i, 4);                       // compilers обычно делают mov
-        __m256i y = _mm256_set1_epi32(static_cast<int>(w)); // broadcast 32-bit
-        __m256i z = _mm256_shuffle_epi8(y, shuf);           // replicate bytes: b0x8, b1x8, b2x8, b3x8
-        z = _mm256_and_si256(z, bitmask);                   // 0 or power-of-two
-
-        // want 0/1: (z != 0) ? 1 : 0
-        __m256i is_zero = _mm256_cmpeq_epi8(z, zero);
-        __m256i out = _mm256_andnot_si256(is_zero, ones);
-
-        _mm256_storeu_si256((__m256i*)(dst8 + i * 8), out);
+    for (; i + 16U <= len; i += 16U) {
+        const __m256i bytes = _mm256_broadcastsi128_si256(
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(src8 + i)));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst8 + i * 8U + 0U),
+                            unpack4_bytes_avx2(bytes, shuffle0, bitmask, ones));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst8 + i * 8U + 32U),
+                            unpack4_bytes_avx2(bytes, shuffle1, bitmask, ones));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst8 + i * 8U + 64U),
+                            unpack4_bytes_avx2(bytes, shuffle2, bitmask, ones));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst8 + i * 8U + 96U),
+                            unpack4_bytes_avx2(bytes, shuffle3, bitmask, ones));
     }
 
-    // tail
-    Unpack8_LSB_generic(dst8 + i * 8, src8 + i, len - i);
+    if (i + 8U <= len) {
+        const __m256i bytes = _mm256_broadcastsi128_si256(
+            _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src8 + i)));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst8 + i * 8U + 0U),
+                            unpack4_bytes_avx2(bytes, shuffle0, bitmask, ones));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst8 + i * 8U + 32U),
+                            unpack4_bytes_avx2(bytes, shuffle1, bitmask, ones));
+        i += 8U;
+    }
+
+    if (i + 4U <= len) {
+        uint32_t w;
+        std::memcpy(&w, src8 + i, 4);
+        const __m256i bytes = _mm256_set1_epi32(static_cast<int>(w));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst8 + i * 8U),
+                            unpack4_bytes_avx2(bytes, shuffle0, bitmask, ones));
+        i += 4U;
+    }
+
+    if (msb) {
+        Unpack8_MSB_generic(dst8 + i * 8U, src8 + i, len - i);
+    } else {
+        Unpack8_LSB_generic(dst8 + i * 8U, src8 + i, len - i);
+    }
+}
+
+} // namespace
+
+void Unpack8_LSB_avx2(void* dst, const void* src, const size_t len) {
+    const __m256i bitmask = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, static_cast<char>(128),
+                                             1, 2, 4, 8, 16, 32, 64, static_cast<char>(128),
+                                             1, 2, 4, 8, 16, 32, 64, static_cast<char>(128),
+                                             1, 2, 4, 8, 16, 32, 64, static_cast<char>(128));
+    unpack8_avx2_impl(dst, src, len, bitmask, false);
 }
 
 //
 // Unpack8_MSB
 //
 
-void Unpack8_MSB_avx2(void* dst, const void* src, size_t len) {
-    auto* dst8 = static_cast<uint8_t*>(dst);
-    const auto* src8 = static_cast<const uint8_t*>(src);
-
-    size_t i = 0;
-
-    // Same vector path, but with reversed bitmask order per byte.
-    const __m256i shuf = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3);
-    const __m256i bitmask = _mm256_setr_epi8(static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1, static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1,
-                                             static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1, static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1);
-    const __m256i zero = _mm256_setzero_si256();
-    const __m256i ones = _mm256_set1_epi8(1);
-
-    // 4 input bytes -> 32 output bytes (8 bytes per input byte)
-    for (; i + 4 <= len; i += 4) {
-        uint32_t w;
-        std::memcpy(&w, src8 + i, 4);
-        __m256i y = _mm256_set1_epi32(static_cast<int>(w));
-        __m256i z = _mm256_shuffle_epi8(y, shuf);
-        z = _mm256_and_si256(z, bitmask);
-
-        __m256i is_zero = _mm256_cmpeq_epi8(z, zero);
-        __m256i out = _mm256_andnot_si256(is_zero, ones);
-
-        _mm256_storeu_si256((__m256i*)(dst8 + i * 8), out);
-    }
-
-    // tail
-    Unpack8_MSB_generic(dst8 + i * 8, src8 + i, len - i);
+void Unpack8_MSB_avx2(void* dst, const void* src, const size_t len) {
+    const __m256i bitmask = _mm256_setr_epi8(static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1,
+                                             static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1,
+                                             static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1,
+                                             static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1);
+    unpack8_avx2_impl(dst, src, len, bitmask, true);
 }
 
 
