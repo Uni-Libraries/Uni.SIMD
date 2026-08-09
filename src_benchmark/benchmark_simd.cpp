@@ -420,8 +420,8 @@ public:
         row->profiles.at(profile_index) = ProfileMeasurement{statistics, speedup};
     }
 
-    void print(const topology::CoreClass& core_class, const std::size_t class_index,
-               const std::size_t class_count) const {
+    void print(const topology::CoreClass& core_class, const topology::ThreadAffinityStatus affinity_status,
+               const std::size_t class_index, const std::size_t class_count) const {
         constexpr auto widths = [] {
             std::array<std::size_t, kWorkloadProfiles.size() + 2U> result{};
             result[0] = 30U;
@@ -431,9 +431,11 @@ public:
         }();
         const std::string border = table_border(widths);
         const std::string frame = outer_border(border);
-        const std::string title =
-            fmt::format("RESULTS {}/{}: {} (pinned to cpu{})", class_index + 1U, class_count,
-                        core_type_name(core_class), core_class.logical_processor.logical_processor_id);
+        const std::string placement = affinity_status == topology::ThreadAffinityStatus::unsupported
+                                          ? "scheduler-managed; affinity unsupported"
+                                          : fmt::format("pinned to cpu{}", core_class.logical_processor.logical_processor_id);
+        const std::string title = fmt::format("RESULTS {}/{}: {} ({})", class_index + 1U, class_count,
+                                              core_type_name(core_class), placement);
         fmt::print("\n{}\n| {:^{}} |\n{}\n", frame, title, frame.size() - 4U, border);
         fmt::print("| {:<30} | {:<8} |", "kernel", "backend");
         for (const auto& profile : kWorkloadProfiles) {
@@ -782,12 +784,13 @@ void run_benchmark_profile(const Config& config, const WorkloadProfile& profile,
 }
 
 void run_benchmarks_on_core(const Config& config, const topology::CoreClass& core_class,
-                            const std::size_t class_index, const std::size_t class_count) {
+                            const topology::ThreadAffinityStatus affinity_status, const std::size_t class_index,
+                            const std::size_t class_count) {
     BenchmarkResults results;
     for (std::size_t profile_index = 0U; profile_index < kWorkloadProfiles.size(); ++profile_index) {
         run_benchmark_profile(config, kWorkloadProfiles[profile_index], profile_index, results);
     }
-    results.print(core_class, class_index, class_count);
+    results.print(core_class, affinity_status, class_index, class_count);
 }
 
 [[nodiscard]] std::string collect_members(const topology::Snapshot& snapshot, const std::string_view class_key) {
@@ -902,11 +905,11 @@ void run_benchmarks(const Config& config) {
     for (std::size_t index = 0U; index < core_classes.size(); ++index) {
         const auto& core_class = core_classes[index];
         topology::ScopedThreadAffinity affinity(core_class.logical_processor);
-        if (!affinity.is_pinned()) {
-            throw std::runtime_error("failed to pin benchmark thread to logical CPU " +
+        if (!affinity.can_run()) {
+            throw std::runtime_error("failed to apply benchmark thread affinity for logical CPU " +
                                      std::to_string(core_class.logical_processor.logical_processor_id));
         }
-        run_benchmarks_on_core(config, core_class, index, core_classes.size());
+        run_benchmarks_on_core(config, core_class, affinity.status(), index, core_classes.size());
     }
 }
 

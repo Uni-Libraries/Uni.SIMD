@@ -35,6 +35,7 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/thread_policy.h>
+#include <sys/sysctl.h>
 #endif
 
 #if defined(_WIN32)
@@ -557,6 +558,75 @@ void classify_linux(Snapshot& snapshot) {
 
 #endif // __linux__
 
+#if defined(__APPLE__)
+
+template <typename Value>
+[[nodiscard]] std::optional<Value> sysctl_value(const char* name) {
+    Value value{};
+    std::size_t size = sizeof(value);
+    if (sysctlbyname(name, &value, &size, nullptr, 0U) != 0 || size != sizeof(value)) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] std::string sysctl_string(const char* name) {
+    std::size_t size = 0U;
+    if (sysctlbyname(name, nullptr, &size, nullptr, 0U) != 0 || size <= 1U) {
+        return {};
+    }
+    std::string value(size, '\0');
+    if (sysctlbyname(name, value.data(), &size, nullptr, 0U) != 0) {
+        return {};
+    }
+    value.resize(std::char_traits<char>::length(value.c_str()));
+    return value;
+}
+
+[[nodiscard]] Result query_macos() {
+    Result result;
+    result.snapshot.model_name = sysctl_string("machdep.cpu.brand_string");
+    if (result.snapshot.model_name.empty()) {
+        result.snapshot.model_name = sysctl_string("hw.model");
+    }
+    if (result.snapshot.model_name.empty()) {
+        result.snapshot.model_name = "unknown";
+    }
+
+    const std::uint32_t logical_count = sysctl_value<std::uint32_t>("hw.logicalcpu").value_or(
+        static_cast<std::uint32_t>(std::max(1U, std::thread::hardware_concurrency())));
+    const std::uint32_t physical_count =
+        sysctl_value<std::uint32_t>("hw.physicalcpu").value_or(logical_count);
+    const std::uint64_t max_frequency_khz =
+        sysctl_value<std::uint64_t>("hw.cpufrequency_max").value_or(0U) / 1000U;
+    const std::uint64_t l1_data_cache_bytes = sysctl_value<std::uint64_t>("hw.l1dcachesize").value_or(0U);
+    const std::uint64_t l2_cache_bytes = sysctl_value<std::uint64_t>("hw.l2cachesize").value_or(0U);
+    const std::uint64_t l3_cache_bytes = sysctl_value<std::uint64_t>("hw.l3cachesize").value_or(0U);
+
+    result.snapshot.logical_processors.reserve(logical_count);
+    for (std::uint32_t cpu = 0U; cpu < logical_count; ++cpu) {
+        result.snapshot.logical_processors.push_back({
+            .logical_processor_id = static_cast<int>(cpu),
+            .package_id = 0,
+            .max_frequency_khz = max_frequency_khz,
+            .l1_data_cache_bytes = l1_data_cache_bytes,
+            .l2_cache_bytes = l2_cache_bytes,
+            .l3_cache_bytes = l3_cache_bytes,
+            .performance_rank = max_frequency_khz,
+            .performance_class_label = "cpu" + std::to_string(cpu),
+        });
+    }
+    fill_aggregate_fields(result.snapshot);
+    result.snapshot.physical_core_count = physical_count;
+    result.status = {
+        .code = StatusCode::partial,
+        .message = "CPU topology is partially available from macOS sysctl",
+    };
+    return result;
+}
+
+#endif // __APPLE__
+
 #if defined(_WIN32)
 
 struct WindowsProcessorPowerInformation {
@@ -715,7 +785,7 @@ Result query_snapshot() noexcept {
 #if defined(__linux__)
         return query_linux();
 #elif defined(__APPLE__)
-        return fallback_result("CPU topology is partially available; macOS affinity uses scheduler hints");
+        return query_macos();
 #elif defined(_WIN32)
         return query_windows();
 #else
@@ -782,7 +852,9 @@ ScopedThreadAffinity::ScopedThreadAffinity(const LogicalProcessor& processor) no
     cpu_set_t target;
     CPU_ZERO(&target);
     CPU_SET(static_cast<unsigned>(processor.logical_processor_id), &target);
-    pinned_ = pthread_setaffinity_np(pthread_self(), sizeof(target), &target) == 0;
+    status_ = pthread_setaffinity_np(pthread_self(), sizeof(target), &target) == 0
+                  ? ThreadAffinityStatus::applied
+                  : ThreadAffinityStatus::failed;
 #elif defined(__APPLE__)
     if (processor.logical_processor_id < 0 || processor.logical_processor_id == std::numeric_limits<int>::max()) {
         return;
@@ -791,13 +863,19 @@ ScopedThreadAffinity::ScopedThreadAffinity(const LogicalProcessor& processor) no
     thread_affinity_policy_data_t previous{};
     mach_msg_type_number_t count = THREAD_AFFINITY_POLICY_COUNT;
     boolean_t get_default = false;
-    if (thread_policy_get(thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&previous), &count,
-                          &get_default) == KERN_SUCCESS) {
+    const kern_return_t get_result = thread_policy_get(
+        thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&previous), &count, &get_default);
+    if (get_result == KERN_NOT_SUPPORTED) {
+        status_ = ThreadAffinityStatus::unsupported;
+    } else if (get_result == KERN_SUCCESS) {
         previous_affinity_tag_ = get_default != 0 ? THREAD_AFFINITY_TAG_NULL : previous.affinity_tag;
         thread_affinity_policy_data_t target{.affinity_tag = processor.logical_processor_id + 1};
-        pinned_ = thread_policy_set(thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&target),
-                                    THREAD_AFFINITY_POLICY_COUNT) == KERN_SUCCESS;
-        restore_previous_ = pinned_;
+        const kern_return_t set_result = thread_policy_set(
+            thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&target), THREAD_AFFINITY_POLICY_COUNT);
+        status_ = set_result == KERN_SUCCESS              ? ThreadAffinityStatus::applied
+                  : set_result == KERN_NOT_SUPPORTED      ? ThreadAffinityStatus::unsupported
+                                                         : ThreadAffinityStatus::failed;
+        restore_previous_ = status_ == ThreadAffinityStatus::applied;
     }
     (void)mach_port_deallocate(mach_task_self(), thread);
 #elif defined(_WIN32)
@@ -812,7 +890,7 @@ ScopedThreadAffinity::ScopedThreadAffinity(const LogicalProcessor& processor) no
         previous_group_id_ = static_cast<std::uint16_t>(previous.Group);
         previous_group_mask_ = static_cast<std::uint64_t>(previous.Mask);
         restore_previous_ = true;
-        pinned_ = true;
+        status_ = ThreadAffinityStatus::applied;
     }
 #else
     (void)processor;

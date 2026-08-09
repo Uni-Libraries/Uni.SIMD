@@ -61,6 +61,12 @@ struct CoreClass {
     std::uint64_t performance_rank = 0U;
 };
 
+enum class ThreadAffinityStatus : std::uint8_t {
+    failed,
+    applied,
+    unsupported,
+};
+
 [[nodiscard]] Result query_snapshot() noexcept;
 [[nodiscard]] std::vector<CoreClass> build_core_classes(const Snapshot& snapshot);
 
@@ -72,10 +78,11 @@ public:
     ScopedThreadAffinity(const ScopedThreadAffinity&) = delete;
     ScopedThreadAffinity& operator=(const ScopedThreadAffinity&) = delete;
 
-    [[nodiscard]] bool is_pinned() const noexcept { return pinned_; }
+    [[nodiscard]] ThreadAffinityStatus status() const noexcept { return status_; }
+    [[nodiscard]] bool can_run() const noexcept { return status_ != ThreadAffinityStatus::failed; }
 
 private:
-    bool pinned_ = false;
+    ThreadAffinityStatus status_ = ThreadAffinityStatus::failed;
     bool restore_previous_ = false;
     std::uint16_t previous_group_id_ = 0U;
     std::uint64_t previous_group_mask_ = 0U;
