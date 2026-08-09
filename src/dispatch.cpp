@@ -168,7 +168,9 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
 
 #if UNI_SIMD_HAVE_AVX2_FMA
     if (caps.avx2 && caps.fma && allows(requested, Backend::avx2_fma)) {
+        context.dot_ = &kernels::DotProdCF32Real_avx2fma;
         context.symmetric_dot_ = &kernels::DotProdSymmetricCF32Real_avx2fma;
+        context.backends_[static_cast<std::size_t>(Kernel::dot_cf32_f32)] = Backend::avx2_fma;
         context.backends_[static_cast<std::size_t>(Kernel::dot_symmetric_cf32_f32)] = Backend::avx2_fma;
     }
 #endif
