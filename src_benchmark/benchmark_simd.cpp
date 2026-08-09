@@ -90,7 +90,7 @@ struct Statistics {
 };
 
 template <typename Value>
-class AlignedAllocator final {
+class AlignedAllocator {
 public:
     using value_type = Value;
 
