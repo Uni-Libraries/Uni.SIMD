@@ -4,6 +4,7 @@
 
 // stdlib
 #include <cstdint>
+#include <cstring>
 
 // compiler
 #include <emmintrin.h>
@@ -20,13 +21,6 @@
 namespace uni::simd::detail {
 
 namespace {
-[[nodiscard]] static inline uint8_t ReverseBits8(uint8_t v) {
-    v = static_cast<uint8_t>(((v & 0xF0u) >> 4) | ((v & 0x0Fu) << 4));
-    v = static_cast<uint8_t>(((v & 0xCCu) >> 2) | ((v & 0x33u) << 2));
-    v = static_cast<uint8_t>(((v & 0xAAu) >> 1) | ((v & 0x55u) << 1));
-    return v;
-}
-
 void power_spectrum_cf32f32_scalar_tail(float* dst, const float* src, const size_t len, const float inverse_normalization,
                                         const float output_scale) noexcept {
     for (size_t i = 0; i < len; ++i) {
@@ -134,6 +128,32 @@ void Pack8_LSB_sse2(void* dst, const void* src, size_t len) {
     Pack8_LSB_generic(&dst8[i], &src8[i * 8], len - i);
 }
 
+//
+// Pack8_MSB
+//
+
+void Pack8_MSB_sse2(void* dst, const void* src, size_t len) {
+    auto* dst8 = static_cast<uint8_t*>(dst);
+    const auto* src8 = static_cast<const uint8_t*>(src);
+
+    const __m128i ones = _mm_set1_epi8(1);
+    size_t i = 0;
+
+    for (; i + 2 <= len; i += 2) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src8 + i * 8));
+        v = _mm_and_si128(v, ones);
+        v = _mm_shufflelo_epi16(v, _MM_SHUFFLE(0, 1, 2, 3));
+        v = _mm_shufflehi_epi16(v, _MM_SHUFFLE(0, 1, 2, 3));
+        v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));
+        v = _mm_slli_epi16(v, 7);
+
+        const auto mask = static_cast<uint16_t>(_mm_movemask_epi8(v));
+        std::memcpy(dst8 + i, &mask, sizeof(mask));
+    }
+
+    Pack8_MSB_generic(dst8 + i, src8 + i * 8, len - i);
+}
+
 
 
 //
@@ -172,6 +192,44 @@ void Unpack8_LSB_sse2(void* dst, const void* src, size_t len) {
     }
 
     Unpack8_LSB_generic(dst8 + i * 8, src8 + i, len - i);
+}
+
+//
+// Unpack8_MSB
+//
+
+void Unpack8_MSB_sse2(void* dst, const void* src, size_t len) {
+    auto* dst8 = static_cast<uint8_t*>(dst);
+    const auto* src8 = static_cast<const uint8_t*>(src);
+
+    const __m128i bit_masks = _mm_setr_epi8(static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1,
+                                             static_cast<char>(128), 64, 32, 16, 8, 4, 2, 1);
+    const __m128i ones = _mm_set1_epi8(1);
+    size_t i = 0;
+
+    for (; i + 8 <= len; i += 8) {
+        const __m128i bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(src8 + i));
+        const __m128i pairs = _mm_unpacklo_epi8(bytes, bytes);
+        const __m128i low_quads = _mm_unpacklo_epi16(pairs, pairs);
+        const __m128i high_quads = _mm_unpackhi_epi16(pairs, pairs);
+
+        __m128i out0 = _mm_unpacklo_epi32(low_quads, low_quads);
+        __m128i out1 = _mm_unpackhi_epi32(low_quads, low_quads);
+        __m128i out2 = _mm_unpacklo_epi32(high_quads, high_quads);
+        __m128i out3 = _mm_unpackhi_epi32(high_quads, high_quads);
+
+        out0 = _mm_min_epu8(_mm_and_si128(out0, bit_masks), ones);
+        out1 = _mm_min_epu8(_mm_and_si128(out1, bit_masks), ones);
+        out2 = _mm_min_epu8(_mm_and_si128(out2, bit_masks), ones);
+        out3 = _mm_min_epu8(_mm_and_si128(out3, bit_masks), ones);
+
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 0), out0);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 16), out1);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 32), out2);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + i * 8 + 48), out3);
+    }
+
+    Unpack8_MSB_generic(dst8 + i * 8, src8 + i, len - i);
 }
 
 //

@@ -138,12 +138,15 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
         context.invert_lsb_ = &kernels::Invert1_sse2;
         context.invert_bytes_ = &kernels::Invert8_sse2;
         context.pack_lsb_ = &kernels::Pack8_LSB_sse2;
+        context.pack_msb_ = &kernels::Pack8_MSB_sse2;
         context.unpack_lsb_ = &kernels::Unpack8_LSB_sse2;
+        context.unpack_msb_ = &kernels::Unpack8_MSB_sse2;
         context.quantize_ = &kernels::MapQPSK_CF32_U8_sse2;
         context.magnitude_squared_ = &kernels::PowerSpectrumCF32F32_sse2;
         context.psd_ = &kernels::PowerSpectralDensityCF32F32_sse2;
-        for (const auto kernel : {Kernel::invert_lsb, Kernel::invert_bytes, Kernel::pack_bits_lsb, Kernel::unpack_bits_lsb,
-                                  Kernel::quantize_interleaved_cf32_u8, Kernel::magnitude_squared_cf32}) {
+        for (const auto kernel : {Kernel::invert_lsb, Kernel::invert_bytes, Kernel::pack_bits_lsb, Kernel::pack_bits_msb,
+                                  Kernel::unpack_bits_lsb, Kernel::unpack_bits_msb, Kernel::quantize_interleaved_cf32_u8,
+                                  Kernel::magnitude_squared_cf32}) {
             context.backends_[static_cast<std::size_t>(kernel)] = Backend::sse2;
         }
     }

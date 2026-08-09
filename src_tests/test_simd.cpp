@@ -67,12 +67,15 @@ int main() {
         vector_bits[i] = static_cast<std::uint8_t>((i * 5U + 1U) & 1U);
     }
     std::array<std::uint8_t, 29U> vector_packed{};
+    std::array<std::uint8_t, 29U> vector_msb_packed{};
     std::array<std::uint8_t, 232U> vector_unpacked{};
     std::array<std::uint8_t, 232U> vector_msb_unpacked_reference{};
     assert(generic.pack_bits_lsb(vector_packed, vector_bits) == Result::success);
+    assert(generic.pack_bits_msb(vector_msb_packed, vector_bits) == Result::success);
     assert(generic.unpack_bits_lsb(vector_unpacked, vector_packed) == Result::success);
-    assert(generic.unpack_bits_msb(vector_msb_unpacked_reference, vector_packed) == Result::success);
+    assert(generic.unpack_bits_msb(vector_msb_unpacked_reference, vector_msb_packed) == Result::success);
     assert(vector_unpacked == vector_bits);
+    assert(vector_msb_unpacked_reference == vector_bits);
 
     std::array<std::complex<float>, 17U> vector_symbols{};
     std::array<float, 17U> vector_taps{};
@@ -108,6 +111,7 @@ int main() {
         assert(forced_power[1] == 0.5f);
 
         std::array<std::uint8_t, 29U> backend_packed{};
+        std::array<std::uint8_t, 29U> backend_msb_packed{};
         std::array<std::uint8_t, 232U> backend_unpacked{};
         std::array<std::uint8_t, 232U> backend_msb_unpacked{};
         std::array<std::uint8_t, 34U> backend_soft{};
@@ -116,9 +120,11 @@ int main() {
         std::complex<float> backend_symmetric_dot{};
         assert(forced->pack_bits_lsb(backend_packed, vector_bits) == Result::success);
         assert(backend_packed == vector_packed);
+        assert(forced->pack_bits_msb(backend_msb_packed, vector_bits) == Result::success);
+        assert(backend_msb_packed == vector_msb_packed);
         assert(forced->unpack_bits_lsb(backend_unpacked, backend_packed) == Result::success);
         assert(backend_unpacked == vector_bits);
-        assert(forced->unpack_bits_msb(backend_msb_unpacked, backend_packed) == Result::success);
+        assert(forced->unpack_bits_msb(backend_msb_unpacked, backend_msb_packed) == Result::success);
         assert(backend_msb_unpacked == vector_msb_unpacked_reference);
         assert(forced->quantize_interleaved_cf32_u8(backend_soft, vector_symbols, {.scale = -7.0f}) == Result::success);
         assert(backend_soft == vector_soft_reference);
