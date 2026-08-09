@@ -345,11 +345,9 @@ void verify_complex(const std::complex<float> expected, const std::complex<float
                     const std::size_t accumulated_items) {
     const float relative_tolerance = 1.0e-4f + 8.0f * std::numeric_limits<float>::epsilon() *
                                                        std::sqrt(static_cast<float>(accumulated_items));
-    const float real_tolerance = relative_tolerance * std::max(1.0f, std::abs(expected.real()));
-    const float imag_tolerance = relative_tolerance * std::max(1.0f, std::abs(expected.imag()));
+    const float tolerance = relative_tolerance * std::max(1.0f, std::abs(expected));
     if (!std::isfinite(actual.real()) || !std::isfinite(actual.imag()) ||
-        std::abs(expected.real() - actual.real()) > real_tolerance ||
-        std::abs(expected.imag() - actual.imag()) > imag_tolerance) {
+        std::abs(expected - actual) > tolerance) {
         std::cerr << "complex result mismatch: expected (" << expected.real() << ", " << expected.imag()
                   << "), actual (" << actual.real() << ", " << actual.imag() << ")\n";
         throw std::runtime_error("backend result differs from the generic reference");
