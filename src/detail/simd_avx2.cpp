@@ -38,12 +38,15 @@ void power_spectrum_cf32f32_avx2_impl(float* dst, const float* src, const size_t
     const __m256 output_scale_ps = _mm256_set1_ps(output_scale);
     size_t i = 0;
 
-    for (; i + 4U <= len; i += 4U) {
-        const __m256 x = _mm256_mul_ps(_mm256_loadu_ps(src + 2U * i), inverse_normalization_ps);
-        const __m256 sq = _mm256_mul_ps(x, x);
-        const __m256 pair_sum = _mm256_hadd_ps(sq, sq);
-        const __m256 packed = _mm256_mul_ps(_mm256_permutevar8x32_ps(pair_sum, _mm256_setr_epi32(0, 1, 4, 5, 0, 0, 0, 0)), output_scale_ps);
-        _mm_storeu_ps(dst + i, _mm256_castps256_ps128(packed));
+    for (; i + 8U <= len; i += 8U) {
+        const __m256 x0 = _mm256_mul_ps(_mm256_loadu_ps(src + 2U * i), inverse_normalization_ps);
+        const __m256 x1 = _mm256_mul_ps(_mm256_loadu_ps(src + 2U * i + 8U), inverse_normalization_ps);
+        const __m256 sq0 = _mm256_mul_ps(x0, x0);
+        const __m256 sq1 = _mm256_mul_ps(x1, x1);
+        const __m256 pair_sum = _mm256_hadd_ps(sq0, sq1);
+        const __m256 packed = _mm256_castsi256_ps(
+            _mm256_permute4x64_epi64(_mm256_castps_si256(pair_sum), _MM_SHUFFLE(3, 1, 2, 0)));
+        _mm256_storeu_ps(dst + i, _mm256_mul_ps(packed, output_scale_ps));
     }
 
     if (i < len) {
