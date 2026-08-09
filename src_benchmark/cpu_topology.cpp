@@ -32,6 +32,11 @@
 #include <sched.h>
 #endif
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
+#endif
+
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
@@ -709,6 +714,8 @@ Result query_snapshot() noexcept {
     try {
 #if defined(__linux__)
         return query_linux();
+#elif defined(__APPLE__)
+        return fallback_result("CPU topology is partially available; macOS affinity uses scheduler hints");
 #elif defined(_WIN32)
         return query_windows();
 #else
@@ -776,6 +783,23 @@ ScopedThreadAffinity::ScopedThreadAffinity(const LogicalProcessor& processor) no
     CPU_ZERO(&target);
     CPU_SET(static_cast<unsigned>(processor.logical_processor_id), &target);
     pinned_ = pthread_setaffinity_np(pthread_self(), sizeof(target), &target) == 0;
+#elif defined(__APPLE__)
+    if (processor.logical_processor_id < 0 || processor.logical_processor_id == std::numeric_limits<int>::max()) {
+        return;
+    }
+    const thread_t thread = mach_thread_self();
+    thread_affinity_policy_data_t previous{};
+    mach_msg_type_number_t count = THREAD_AFFINITY_POLICY_COUNT;
+    boolean_t get_default = false;
+    if (thread_policy_get(thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&previous), &count,
+                          &get_default) == KERN_SUCCESS) {
+        previous_affinity_tag_ = get_default != 0 ? THREAD_AFFINITY_TAG_NULL : previous.affinity_tag;
+        thread_affinity_policy_data_t target{.affinity_tag = processor.logical_processor_id + 1};
+        pinned_ = thread_policy_set(thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&target),
+                                    THREAD_AFFINITY_POLICY_COUNT) == KERN_SUCCESS;
+        restore_previous_ = pinned_;
+    }
+    (void)mach_port_deallocate(mach_task_self(), thread);
 #elif defined(_WIN32)
     if (processor.group_index >= 64U) {
         return;
@@ -808,6 +832,15 @@ ScopedThreadAffinity::~ScopedThreadAffinity() {
         }
     }
     (void)pthread_setaffinity_np(pthread_self(), sizeof(previous), &previous);
+#elif defined(__APPLE__)
+    if (!restore_previous_) {
+        return;
+    }
+    const thread_t thread = mach_thread_self();
+    thread_affinity_policy_data_t previous{.affinity_tag = previous_affinity_tag_};
+    (void)thread_policy_set(thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&previous),
+                            THREAD_AFFINITY_POLICY_COUNT);
+    (void)mach_port_deallocate(mach_task_self(), thread);
 #elif defined(_WIN32)
     if (!restore_previous_) {
         return;

@@ -79,6 +79,7 @@ private:
     bool restore_previous_ = false;
     std::uint16_t previous_group_id_ = 0U;
     std::uint64_t previous_group_mask_ = 0U;
+    int previous_affinity_tag_ = 0;
     std::vector<int> previous_cpu_ids_;
 };
 
