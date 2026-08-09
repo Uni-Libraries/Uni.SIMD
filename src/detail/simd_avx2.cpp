@@ -264,7 +264,7 @@ void Unpack8_MSB_avx2(void* dst, const void* src, size_t len) {
 // MapQPSK_CF32_U8
 //
 
-static inline __m256i soft8_ccsds_from_ps(__m256 x, __m256 gain_ps) {
+static inline __m256i soft8_ccsds_i32_from_ps(__m256 x, __m256 gain_ps) {
     const __m256 bias = _mm256_set1_ps(128.0f);
     const __m256 zero = _mm256_set1_ps(0.0f);
     const __m256 max255 = _mm256_set1_ps(255.0f);
@@ -275,11 +275,7 @@ static inline __m256i soft8_ccsds_from_ps(__m256 x, __m256 gain_ps) {
     s = _mm256_min_ps(s, max255);
     s = _mm256_blendv_ps(s, bias, nan_mask);
 
-    __m256i i32 = _mm256_cvtps_epi32(s);
-    __m256i z = _mm256_setzero_si256();
-    __m256i i16 = _mm256_packs_epi32(i32, z);
-    __m256i u8 = _mm256_packus_epi16(i16, z);
-    return u8; // first 4 bytes of each 128-lane hold values
+    return _mm256_cvtps_epi32(s);
 }
 
 void MapQPSK_CF32_U8_avx2(void* dst, const void* src, size_t len, float gain) {
@@ -290,28 +286,14 @@ void MapQPSK_CF32_U8_avx2(void* dst, const void* src, size_t len, float gain) {
     size_t i = 0;
 
     for (; i + 8 <= len; i += 8) {
-        __m256 a = _mm256_loadu_ps(incf32 + 2 * i + 0); // I0 Q0 I1 Q1 I2 Q2 I3 Q3
-        __m256 b = _mm256_loadu_ps(incf32 + 2 * i + 8); // I4 Q4 I5 Q5 I6 Q6 I7 Q7
-
-        const __m256 tI = _mm256_shuffle_ps(a, b, _MM_SHUFFLE(2, 0, 2, 0));
-        const __m256 tQ = _mm256_shuffle_ps(a, b, _MM_SHUFFLE(3, 1, 3, 1));
-
-        const __m256 I = _mm256_permutevar8x32_ps(tI, _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7));
-        const __m256 Q = _mm256_permutevar8x32_ps(tQ, _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7));
-
-        __m256i u8I = soft8_ccsds_from_ps(I, gain_ps);
-        __m256i u8Q = soft8_ccsds_from_ps(Q, gain_ps);
-
-        const __m128i I0 = _mm256_castsi256_si128(u8I);
-        const __m128i I1 = _mm256_extracti128_si256(u8I, 1);
-        const __m128i Q0 = _mm256_castsi256_si128(u8Q);
-        const __m128i Q1 = _mm256_extracti128_si256(u8Q, 1);
-
-        const __m128i iq0 = _mm_unpacklo_epi8(I0, Q0); // 8 bytes for symbols 0..3
-        const __m128i iq1 = _mm_unpacklo_epi8(I1, Q1); // 8 bytes for symbols 4..7
-
-        _mm_storel_epi64(reinterpret_cast<__m128i*>(dst8 + 2 * i + 0), iq0);
-        _mm_storel_epi64(reinterpret_cast<__m128i*>(dst8 + 2 * i + 8), iq1);
+        const __m256 a = _mm256_loadu_ps(incf32 + 2 * i);
+        const __m256 b = _mm256_loadu_ps(incf32 + 2 * i + 8);
+        const __m256i i32a = soft8_ccsds_i32_from_ps(a, gain_ps);
+        const __m256i i32b = soft8_ccsds_i32_from_ps(b, gain_ps);
+        const __m256i i16 = _mm256_packs_epi32(i32a, i32b);
+        const __m128i u8 = _mm_packus_epi16(_mm256_castsi256_si128(i16), _mm256_extracti128_si256(i16, 1));
+        const __m128i packed = _mm_shuffle_epi32(u8, _MM_SHUFFLE(3, 1, 2, 0));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dst8 + 2 * i), packed);
     }
 
     if (i < len) {
