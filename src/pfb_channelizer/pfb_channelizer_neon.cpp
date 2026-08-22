@@ -37,8 +37,8 @@ void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& bl
     const bool direct = data.selected_output_count() == 1U;
     const float* weights_re = PfbChannelizerAccess::selected_transform_re(data);
     const float* weights_im = PfbChannelizerAccess::selected_transform_im(data);
-    alignas(16) std::array<std::array<float, Bins>, 4U> values_re;
-    alignas(16) std::array<std::array<float, Bins>, 4U> values_im;
+    alignas(16) std::array<float, 4U * Bins> values_re;
+    alignas(16) std::array<float, 4U * Bins> values_im;
     float32x4_t direct_re[4U];
     float32x4_t direct_im[4U];
     if (direct) {
@@ -103,25 +103,26 @@ void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& bl
                 direct_im[hop] = vfmaq_f32(direct_im[hop], transformed_re, weight_im);
                 direct_im[hop] = vfmaq_f32(direct_im[hop], transformed_im, weight_re);
             } else {
-                vst1q_f32(values_re[hop].data() + destination_offset, transformed_re);
-                vst1q_f32(values_im[hop].data() + destination_offset, transformed_im);
+                vst1q_f32(values_re.data() + hop * Bins + destination_offset, transformed_re);
+                vst1q_f32(values_im.data() + hop * Bins + destination_offset, transformed_im);
             }
         }
     }
 
-    for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-        if (direct) {
+    if (direct) {
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
             pfb_store_output(block.outputs[0], output_index + hop,
                              pfb_apply_post_phase(data, 0U, phases[hop],
                                                   horizontal_sum(direct_re[hop]),
                                                   horizontal_sum(direct_im[hop])));
-            continue;
         }
-        pfb_emit_outputs(data, block, output_index + hop, phases[hop],
-                         values_re[hop].data(), values_im[hop].data(),
-                         [](float* const real, float* const imag, const std::size_t count) noexcept {
-                             Ifft_generic(real, imag, count);
-                         });
+    } else {
+        Ifft_neon(values_re.data(), values_im.data(), Bins, HopCount, Bins);
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+            pfb_emit_transformed_outputs(data, block, output_index + hop, phases[hop],
+                                         values_re.data() + hop * Bins,
+                                         values_im.data() + hop * Bins);
+        }
     }
 }
 

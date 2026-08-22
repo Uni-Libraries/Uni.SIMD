@@ -1,45 +1,10 @@
 #include "ifft_cf32/ifft_cf32_internal.hpp"
+#include "ifft_cf32/ifft_cf32_tables.hpp"
 
 #include <cstddef>
-#include <utility>
 
 namespace uni::simd::detail {
 namespace {
-
-constexpr float twiddle_re[16U]{
-    1.0f,          0.9807852804f,  0.9238795325f,  0.8314696123f,
-    0.7071067812f, 0.5555702330f,  0.3826834324f,  0.1950903220f,
-    0.0f,         -0.1950903220f, -0.3826834324f, -0.5555702330f,
-   -0.7071067812f,-0.8314696123f, -0.9238795325f, -0.9807852804f,
-};
-constexpr float twiddle_im[16U]{
-    0.0f, 0.1950903220f, 0.3826834324f, 0.5555702330f,
-    0.7071067812f, 0.8314696123f, 0.9238795325f, 0.9807852804f,
-    1.0f, 0.9807852804f, 0.9238795325f, 0.8314696123f,
-    0.7071067812f, 0.5555702330f, 0.3826834324f, 0.1950903220f,
-};
-
-template <std::size_t Count>
-[[nodiscard]] consteval std::size_t reverse_bits(std::size_t value) noexcept {
-    std::size_t reversed = 0U;
-    for (std::size_t remaining = Count; remaining > 1U; remaining /= 2U) {
-        reversed = (reversed << 1U) | (value & 1U);
-        value >>= 1U;
-    }
-    return reversed;
-}
-
-template <std::size_t Count, std::size_t Index = 0U>
-inline void reorder(float* const real, float* const imag) noexcept {
-    if constexpr (Index < Count) {
-        constexpr std::size_t reversed = reverse_bits<Count>(Index);
-        if constexpr (Index < reversed) {
-            std::swap(real[Index], real[reversed]);
-            std::swap(imag[Index], imag[reversed]);
-        }
-        reorder<Count, Index + 1U>(real, imag);
-    }
-}
 
 template <std::size_t Count, std::size_t Length, std::size_t Butterfly = 0U>
 inline void apply_stage(float* const real, float* const imag) noexcept {
@@ -61,8 +26,8 @@ inline void apply_stage(float* const real, float* const imag) noexcept {
             product_re = -odd_im;
             product_im = odd_re;
         } else {
-            product_re = odd_re * twiddle_re[twiddle] - odd_im * twiddle_im[twiddle];
-            product_im = odd_re * twiddle_im[twiddle] + odd_im * twiddle_re[twiddle];
+            product_re = odd_re * ifft_twiddle_re[twiddle] - odd_im * ifft_twiddle_im[twiddle];
+            product_im = odd_re * ifft_twiddle_im[twiddle] + odd_im * ifft_twiddle_re[twiddle];
         }
         const float even_re = real[even];
         const float even_im = imag[even];
@@ -84,28 +49,33 @@ inline void apply_stages(float* const real, float* const imag) noexcept {
 
 template <std::size_t Count>
 inline void ifft_fixed(float* const real, float* const imag) noexcept {
-    reorder<Count>(real, imag);
+    ifft_reorder<Count>(real, imag);
     apply_stages<Count>(real, imag);
 }
 
 } // namespace
 
-void Ifft_generic(float* const real, float* const imag, const std::size_t count) noexcept {
-    switch (count) {
-    case 4U:
-        ifft_fixed<4U>(real, imag);
-        break;
-    case 8U:
-        ifft_fixed<8U>(real, imag);
-        break;
-    case 16U:
-        ifft_fixed<16U>(real, imag);
-        break;
-    case 32U:
-        ifft_fixed<32U>(real, imag);
-        break;
-    default:
-        break;
+void Ifft_generic(float* const real, float* const imag, const std::size_t size,
+                  const std::size_t transform_count, const std::size_t stride) noexcept {
+    for (std::size_t transform = 0U; transform < transform_count; ++transform) {
+        float* const transform_re = real + transform * stride;
+        float* const transform_im = imag + transform * stride;
+        switch (size) {
+        case 4U:
+            ifft_fixed<4U>(transform_re, transform_im);
+            break;
+        case 8U:
+            ifft_fixed<8U>(transform_re, transform_im);
+            break;
+        case 16U:
+            ifft_fixed<16U>(transform_re, transform_im);
+            break;
+        case 32U:
+            ifft_fixed<32U>(transform_re, transform_im);
+            break;
+        default:
+            break;
+        }
     }
 }
 

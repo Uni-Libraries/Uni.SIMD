@@ -57,10 +57,14 @@ std::size_t PfbChannelizer_generic(PfbChannelizerData& data, const PfbChannelize
                     fft_im[branch] = accumulator_re * rotation_im[branch] + accumulator_im * rotation_re[branch];
                 }
 
-                pfb_emit_outputs(plan, block, produced, post_phase, fft_re.data(), fft_im.data(),
-                                 [](float* const real, float* const imag, const std::size_t count) noexcept {
-                                     Ifft_generic(real, imag, count);
-                                 });
+                if (selected_count == 1U) {
+                    pfb_emit_direct_output(plan, block, produced, post_phase,
+                                           fft_re.data(), fft_im.data());
+                } else {
+                    Ifft_generic(fft_re.data(), fft_im.data(), bins, 1U, bins);
+                    pfb_emit_transformed_outputs(plan, block, produced, post_phase,
+                                                 fft_re.data(), fft_im.data());
+                }
             }
             ++produced;
             post_phase = post_phase + 1U == phase_period ? 0U : post_phase + 1U;

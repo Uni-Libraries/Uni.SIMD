@@ -144,30 +144,33 @@ inline void pfb_store_output(const std::span<float> output, const std::size_t in
     output[2U * index + 1U] = value.imag();
 }
 
-template <typename Transform>
-inline void pfb_emit_outputs(const PfbChannelizerData& data, const PfbChannelizerBlock& block,
-                             const std::size_t output_index, const std::size_t phase,
-                             float* const transform_re, float* const transform_im,
-                             Transform&& transform) noexcept {
+inline void pfb_emit_direct_output(const PfbChannelizerData& data,
+                                   const PfbChannelizerBlock& block,
+                                   const std::size_t output_index, const std::size_t phase,
+                                   const float* const transform_re,
+                                   const float* const transform_im) noexcept {
     const std::size_t bins = data.bin_count();
-    const std::size_t selected_count = data.selected_output_count();
-    if (selected_count == 1U) {
-        const float* weights_re = PfbChannelizerAccess::selected_transform_re(data);
-        const float* weights_im = PfbChannelizerAccess::selected_transform_im(data);
-        float value_re = 0.0f;
-        float value_im = 0.0f;
-        for (std::size_t branch = 0U; branch < bins; ++branch) {
-            value_re += transform_re[branch] * weights_re[branch] -
-                        transform_im[branch] * weights_im[branch];
-            value_im += transform_re[branch] * weights_im[branch] +
-                        transform_im[branch] * weights_re[branch];
-        }
-        pfb_store_output(block.outputs[0], output_index,
-                         pfb_apply_post_phase(data, 0U, phase, value_re, value_im));
-        return;
+    const float* weights_re = PfbChannelizerAccess::selected_transform_re(data);
+    const float* weights_im = PfbChannelizerAccess::selected_transform_im(data);
+    float value_re = 0.0f;
+    float value_im = 0.0f;
+    for (std::size_t branch = 0U; branch < bins; ++branch) {
+        value_re += transform_re[branch] * weights_re[branch] -
+                    transform_im[branch] * weights_im[branch];
+        value_im += transform_re[branch] * weights_im[branch] +
+                    transform_im[branch] * weights_re[branch];
     }
+    pfb_store_output(block.outputs[0], output_index,
+                     pfb_apply_post_phase(data, 0U, phase, value_re, value_im));
+}
 
-    transform(transform_re, transform_im, bins);
+inline void pfb_emit_transformed_outputs(const PfbChannelizerData& data,
+                                         const PfbChannelizerBlock& block,
+                                         const std::size_t output_index,
+                                         const std::size_t phase,
+                                         const float* const transform_re,
+                                         const float* const transform_im) noexcept {
+    const std::size_t selected_count = data.selected_output_count();
     const std::size_t* output_bins = PfbChannelizerAccess::selected_fft_bins(data);
     for (std::size_t output = 0U; output < selected_count; ++output) {
         const std::size_t bin = output_bins[output];

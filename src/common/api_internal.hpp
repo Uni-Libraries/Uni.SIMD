@@ -130,7 +130,7 @@ public:
     [[nodiscard]] Result execute(IfftSplitComplex values) const noexcept;
 
 private:
-    using Function = void (*)(float*, float*, std::size_t) noexcept;
+    using Function = void (*)(float*, float*, std::size_t, std::size_t, std::size_t) noexcept;
     Function function_ = nullptr;
     std::size_t size_ = 0U;
     Backend backend_ = Backend::generic;
@@ -196,7 +196,7 @@ private:
     using SymmetricDotFn = std::complex<float> (*)(const void*, const float*, std::size_t, float) noexcept;
     using PfbChannelizerFn = std::size_t (*)(detail::PfbChannelizerData&, const PfbChannelizerBlock&) noexcept;
     using PfbChannelizerSupportFn = bool (*)(const detail::PfbChannelizerData&) noexcept;
-    using IfftFn = void (*)(float*, float*, std::size_t) noexcept;
+    using IfftFn = void (*)(float*, float*, std::size_t, std::size_t, std::size_t) noexcept;
     using IfftSupportFn = bool (*)(std::size_t) noexcept;
 
     ByteFn invert_lsb_ = nullptr;

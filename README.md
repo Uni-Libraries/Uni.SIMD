@@ -93,7 +93,11 @@ uni_simd_result_e result = uni_simd_execute(
 
 Supported transform sizes are 4, 8, 16, and 32. `stride` is measured in float
 elements and must be at least the transform size; zero means tightly packed.
-A zero transform count is a valid no-op.
+A zero transform count is a valid no-op. The internal backend entry is batch-aware,
+so one dispatch handles the complete descriptor. AVX2/FMA and AArch64 NEON use
+shared radix-2 SIMD stages for 16/32-point transforms; the measured faster
+radix-decomposition is retained for AVX2/FMA IFFT-8. IFFT-4 remains generic because
+SIMD setup and permutation overhead is larger than the transform itself.
 
 ## State
 
@@ -117,7 +121,7 @@ decimation, tap count, grid offset, and output selection. SIMD code is specializ
 only by vector/FFT width; it has no hard-coded coefficient or channel profile.
 Up to four output hops share coefficient loads when the mirrored history ring has
 enough overwrite headroom. A single selected channel uses a direct SIMD transform;
-multiple channels use the corresponding IFFT path. Optimized FIR reductions may
+multiple channels use one batched backend IFFT call for all queued hops. Optimized FIR reductions may
 round differently for different block fragmentation; deterministic math mode uses
 the generic path when bit-stable execution is required.
 

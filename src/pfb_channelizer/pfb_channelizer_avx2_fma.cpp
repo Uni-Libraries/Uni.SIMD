@@ -48,8 +48,8 @@ void process_batch_128(const PfbChannelizerData& data, const PfbChannelizerBlock
     const __m128 weights_im = direct
                                   ? _mm_loadu_ps(PfbChannelizerAccess::selected_transform_im(data))
                                   : _mm_setzero_ps();
-    alignas(16) std::array<std::array<float, Bins>, 4U> values_re;
-    alignas(16) std::array<std::array<float, Bins>, 4U> values_im;
+    alignas(32) std::array<float, 4U * Bins> values_re;
+    alignas(32) std::array<float, 4U * Bins> values_im;
     constexpr std::size_t chain_count = RowIlp ? 4U : 1U;
     __m128 accumulator_re[4U][4U];
     __m128 accumulator_im[4U][4U];
@@ -96,13 +96,16 @@ void process_batch_128(const PfbChannelizerData& data, const PfbChannelizerBlock
                                                   horizontal_sum(value_re), horizontal_sum(value_im)));
             continue;
         }
-        _mm_store_ps(values_re[hop].data(), transformed_re);
-        _mm_store_ps(values_im[hop].data(), transformed_im);
-        pfb_emit_outputs(data, block, output_index + hop, phases[hop],
-                         values_re[hop].data(), values_im[hop].data(),
-                         [](float* const real, float* const imag, const std::size_t count) noexcept {
-                             Ifft_generic(real, imag, count);
-                         });
+        _mm_store_ps(values_re.data() + hop * Bins, transformed_re);
+        _mm_store_ps(values_im.data() + hop * Bins, transformed_im);
+    }
+    if (!direct) {
+        Ifft_avx2_fma(values_re.data(), values_im.data(), Bins, HopCount, Bins);
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+            pfb_emit_transformed_outputs(data, block, output_index + hop, phases[hop],
+                                         values_re.data() + hop * Bins,
+                                         values_im.data() + hop * Bins);
+        }
     }
 }
 
@@ -123,8 +126,8 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
     const bool direct = data.selected_output_count() == 1U;
     const float* weights_re = PfbChannelizerAccess::selected_transform_re(data);
     const float* weights_im = PfbChannelizerAccess::selected_transform_im(data);
-    alignas(32) std::array<std::array<float, Bins>, 4U> values_re;
-    alignas(32) std::array<std::array<float, Bins>, 4U> values_im;
+    alignas(32) std::array<float, 4U * Bins> values_re;
+    alignas(32) std::array<float, 4U * Bins> values_im;
     __m256 direct_re[4U];
     __m256 direct_im[4U];
     if (direct) {
@@ -189,29 +192,26 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
                 direct_im[hop] = _mm256_fmadd_ps(transformed_re, weight_im, direct_im[hop]);
                 direct_im[hop] = _mm256_fmadd_ps(transformed_im, weight_re, direct_im[hop]);
             } else {
-                _mm256_store_ps(values_re[hop].data() + destination_offset, transformed_re);
-                _mm256_store_ps(values_im[hop].data() + destination_offset, transformed_im);
+                _mm256_store_ps(values_re.data() + hop * Bins + destination_offset, transformed_re);
+                _mm256_store_ps(values_im.data() + hop * Bins + destination_offset, transformed_im);
             }
         }
     }
 
-    for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-        if (direct) {
+    if (direct) {
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
             pfb_store_output(block.outputs[0], output_index + hop,
                              pfb_apply_post_phase(data, 0U, phases[hop],
                                                   horizontal_sum(direct_re[hop]),
                                                   horizontal_sum(direct_im[hop])));
-            continue;
         }
-        pfb_emit_outputs(data, block, output_index + hop, phases[hop],
-                         values_re[hop].data(), values_im[hop].data(),
-                         [](float* const real, float* const imag, const std::size_t count) noexcept {
-                             if constexpr (Bins == 8U) {
-                                 Ifft8_avx2_fma(real, imag, count);
-                             } else {
-                                 Ifft_generic(real, imag, count);
-                             }
-                         });
+    } else {
+        Ifft_avx2_fma(values_re.data(), values_im.data(), Bins, HopCount, Bins);
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+            pfb_emit_transformed_outputs(data, block, output_index + hop, phases[hop],
+                                         values_re.data() + hop * Bins,
+                                         values_im.data() + hop * Bins);
+        }
     }
 }
 

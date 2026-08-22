@@ -30,9 +30,7 @@ Result IfftKernel::execute(const IfftSplitComplex values) const noexcept {
                                  : real_begin - imag_begin < required_bytes) {
         return Result::overlapping_buffers;
     }
-    for (std::size_t transform = 0U; transform < values.transform_count; ++transform) {
-        function_(values.real.data() + transform * stride, values.imag.data() + transform * stride, size_);
-    }
+    function_(values.real.data(), values.imag.data(), size_, values.transform_count, stride);
     return Result::success;
 }
 

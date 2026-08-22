@@ -4,6 +4,7 @@
 
 #include "common/api_internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -45,6 +47,17 @@ void test_kernel(const uni::simd::IfftKernel& kernel) {
             const double angle = 2.0 * pi * static_cast<double>(basis * output) / static_cast<double>(count);
             assert(std::abs(real[output] - static_cast<float>(std::cos(angle))) < 2.0e-5f);
             assert(std::abs(imag[output] - static_cast<float>(std::sin(angle))) < 2.0e-5f);
+        }
+
+        real.fill(0.0f);
+        imag.fill(0.0f);
+        imag[basis] = 1.0f;
+        assert(kernel.execute({.real = {real.data(), count}, .imag = {imag.data(), count}}) ==
+               uni::simd::Result::success);
+        for (std::size_t output = 0U; output < count; ++output) {
+            const double angle = 2.0 * pi * static_cast<double>(basis * output) / static_cast<double>(count);
+            assert(std::abs(real[output] + static_cast<float>(std::sin(angle))) < 2.0e-5f);
+            assert(std::abs(imag[output] - static_cast<float>(std::cos(angle))) < 2.0e-5f);
         }
     }
 
@@ -89,14 +102,24 @@ void test_kernel(const uni::simd::IfftKernel& kernel) {
             }
         }
     }
+
+    std::vector<float> unaligned_real(count + 1U);
+    std::vector<float> unaligned_imag(count + 1U);
+    std::copy_n(input_real.begin(), count, unaligned_real.begin() + 1U);
+    std::copy_n(input_imag.begin(), count, unaligned_imag.begin() + 1U);
+    assert(kernel.execute({.real = {unaligned_real.data() + 1U, count},
+                           .imag = {unaligned_imag.data() + 1U, count}}) ==
+           uni::simd::Result::success);
+    compare_direct({input_real.data(), count}, {input_imag.data(), count},
+                   {unaligned_real.data() + 1U, count}, {unaligned_imag.data() + 1U, count});
 }
 
 } // namespace
 
 int main() {
-    std::set<uni::simd::Backend> tested_eight_point_backends;
+    std::set<std::pair<std::size_t, uni::simd::Backend>> tested_backends;
     for (const auto requested : {uni::simd::Backend::generic, uni::simd::Backend::avx2_fma,
-                                 uni::simd::Backend::automatic}) {
+                                  uni::simd::Backend::neon, uni::simd::Backend::automatic}) {
         const auto context = uni::simd::create_context({.backend = requested});
         if (!context) {
             assert(context.error() == uni::simd::Result::unsupported_backend);
@@ -105,13 +128,13 @@ int main() {
         for (const std::size_t count : {4U, 8U, 16U, 32U}) {
             const auto kernel = context->make_ifft_cf32(count);
             assert(kernel.has_value());
-            if (count == 8U && requested == uni::simd::Backend::avx2_fma) {
-                assert(kernel->backend() == uni::simd::Backend::avx2_fma);
-            }
-            if (count != 8U && requested == uni::simd::Backend::avx2_fma) {
+            if ((requested == uni::simd::Backend::avx2_fma || requested == uni::simd::Backend::neon) &&
+                count == 4U) {
                 assert(kernel->backend() == uni::simd::Backend::generic);
+            } else if (requested == uni::simd::Backend::avx2_fma || requested == uni::simd::Backend::neon) {
+                assert(kernel->backend() == requested);
             }
-            if (count == 8U && !tested_eight_point_backends.insert(kernel->backend()).second) {
+            if (!tested_backends.emplace(count, kernel->backend()).second) {
                 continue;
             }
             test_kernel(*kernel);
