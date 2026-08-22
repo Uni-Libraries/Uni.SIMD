@@ -48,7 +48,8 @@ template <typename Left, typename Right>
     }
     const auto left_begin = reinterpret_cast<std::uintptr_t>(left.data());
     const auto right_begin = reinterpret_cast<std::uintptr_t>(right.data());
-    return left_begin < right_begin + right.size_bytes() && right_begin < left_begin + left.size_bytes();
+    return left_begin <= right_begin ? right_begin - left_begin < left.size_bytes()
+                                     : left_begin - right_begin < right.size_bytes();
 }
 
 } // namespace
@@ -126,6 +127,10 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
         data->phase_period = phase_period;
         data->post_phase_re.resize(data->selected_bins.size() * phase_period);
         data->post_phase_im.resize(data->selected_bins.size() * phase_period);
+        if (data->selected_bins.size() == 1U) {
+            data->selected_transform_re.resize(data->bins);
+            data->selected_transform_im.resize(data->bins);
+        }
         for (std::size_t output = 0U; output < data->selected_bins.size(); ++output) {
             const double frequency_bin = static_cast<double>(data->selected_bins[output]) + delta;
             for (std::size_t phase = 0U; phase < phase_period; ++phase) {
@@ -134,6 +139,18 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
                 const std::size_t table_index = output * phase_period + phase;
                 data->post_phase_re[table_index] = snapped_trigonometric(std::cos(angle));
                 data->post_phase_im[table_index] = snapped_trigonometric(std::sin(angle));
+            }
+            if (data->selected_bins.size() == 1U) {
+                const std::size_t fft_bin = static_cast<std::size_t>(
+                    data->selected_bins[output] < 0
+                        ? data->selected_bins[output] + static_cast<std::int32_t>(data->bins)
+                        : data->selected_bins[output]);
+                for (std::size_t branch = 0U; branch < data->bins; ++branch) {
+                    const double angle = 2.0 * pi * static_cast<double>(branch * fft_bin) /
+                                         static_cast<double>(data->bins);
+                    data->selected_transform_re[branch] = snapped_trigonometric(std::cos(angle));
+                    data->selected_transform_im[branch] = snapped_trigonometric(std::sin(angle));
+                }
             }
         }
         data->history.resize(4U * data->history_size);
@@ -183,17 +200,20 @@ std::expected<std::size_t, Result> PfbChannelizer::process(const PfbChannelizerB
     if (!data_) {
         return std::unexpected(Result::invalid_argument);
     }
-    const std::size_t expected = detail::pfb_output_count_unchecked(*data_, block.input.size());
+    if (block.input.size() % 2U != 0U) {
+        return std::unexpected(Result::invalid_size);
+    }
+    const std::size_t expected = detail::pfb_output_count_unchecked(*data_, block.input.size() / 2U);
     for (std::size_t output = 0U; output < data_->selected_bins.size(); ++output) {
-        if (block.outputs[output].size() < expected) {
+        if (block.outputs[output].size() < expected * 2U) {
             return std::unexpected(Result::invalid_size);
         }
-        const auto active = block.outputs[output].first(expected);
+        const auto active = block.outputs[output].first(expected * 2U);
         if (overlaps(active, block.input)) {
             return std::unexpected(Result::overlapping_buffers);
         }
         for (std::size_t previous = 0U; previous < output; ++previous) {
-            if (overlaps(active, block.outputs[previous].first(expected))) {
+            if (overlaps(active, block.outputs[previous].first(expected * 2U))) {
                 return std::unexpected(Result::overlapping_buffers);
             }
         }

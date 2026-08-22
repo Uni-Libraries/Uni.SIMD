@@ -143,13 +143,38 @@ int main(void) {
 
     float real[8] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     float imag[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    uni_simd_split_cf32_t split = {real, imag, 8U};
+    uni_simd_split_cf32_t split = {real, imag, UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE, 8U, 1U, 8U};
     assert(uni_simd_execute(UNI_SIMD_KERNEL_IFFT_SPLIT_CF32, NULL, &split,
                             backend_params, 2U, NULL) == UNI_SIMD_RESULT_SUCCESS);
     for (size_t index = 0U; index < 8U; ++index) {
         assert(fabsf(real[index] - 1.0f) < 1.0e-6f);
         assert(fabsf(imag[index]) < 1.0e-6f);
     }
+    float batch_real[18] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                            77.0f, 77.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float batch_imag[18] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                            -77.0f, -77.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    uni_simd_split_cf32_t batch = {batch_real, batch_imag, UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE, 8U, 2U, 10U};
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_IFFT_SPLIT_CF32, NULL, &batch,
+                            NULL, 0U, NULL) == UNI_SIMD_RESULT_SUCCESS);
+    for (size_t index = 0U; index < 8U; ++index) {
+        assert(fabsf(batch_real[index] - 1.0f) < 1.0e-6f && fabsf(batch_imag[index]) < 1.0e-6f);
+        assert(fabsf(batch_real[10U + index]) < 1.0e-6f && fabsf(batch_imag[10U + index] - 1.0f) < 1.0e-6f);
+    }
+    assert(batch_real[8] == 77.0f && batch_real[9] == 77.0f);
+    assert(batch_imag[8] == -77.0f && batch_imag[9] == -77.0f);
+    uni_simd_split_cf32_t empty_batch = {NULL, NULL, UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE, 8U, 0U, 0U};
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_IFFT_SPLIT_CF32, NULL, &empty_batch,
+                            NULL, 0U, NULL) == UNI_SIMD_RESULT_SUCCESS);
+    uni_simd_split_cf32_t invalid_transform = {real, imag, UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE, 3U, 1U, 3U};
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_IFFT_SPLIT_CF32, NULL, &invalid_transform,
+                            NULL, 0U, NULL) == UNI_SIMD_RESULT_INVALID_SIZE);
+    uni_simd_split_cf32_t invalid_stride = {batch_real, batch_imag, UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE, 8U, 2U, 7U};
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_IFFT_SPLIT_CF32, NULL, &invalid_stride,
+                            NULL, 0U, NULL) == UNI_SIMD_RESULT_INVALID_SIZE);
+    uni_simd_split_cf32_t legacy_descriptor = {real, imag, 8U};
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_IFFT_SPLIT_CF32, NULL, &legacy_descriptor,
+                            NULL, 0U, NULL) == UNI_SIMD_RESULT_INVALID_ARGUMENT);
 
     const float pfb_taps[1] = {1.0f};
     const int32_t logical_bins[1] = {0};
@@ -186,6 +211,16 @@ int main(void) {
     assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, &query_input, NULL,
                             query_params, 2U, &state) == UNI_SIMD_RESULT_SUCCESS);
     assert(query_params[1].value.size == 2U);
+    uni_simd_param_t incomplete_query = u32_param(UNI_SIMD_PARAM_QUERY_OUTPUT_COUNT, 1U);
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, &query_input, NULL,
+                            &incomplete_query, 1U, &state) == UNI_SIMD_RESULT_INVALID_ARGUMENT);
+    uni_simd_param_t reset_query[] = {
+        u32_param(UNI_SIMD_PARAM_QUERY_OUTPUT_COUNT, 1U),
+        size_param(UNI_SIMD_PARAM_OUTPUT_COUNT, 0U),
+        u32_param(UNI_SIMD_PARAM_RESET, 1U),
+    };
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, &query_input, NULL,
+                            reset_query, 3U, &state) == UNI_SIMD_RESULT_INVALID_ARGUMENT);
 
     const float pfb_input_samples[10] = {
         1.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.25f,
@@ -203,6 +238,23 @@ int main(void) {
     assert(fabsf(pfb_output_samples[2] - 2.0f) < 1.0e-6f);
     assert(fabsf(pfb_output_samples[3] - 0.25f) < 1.0e-6f);
 
+    const float failed_reset_sample[2] = {99.0f, 0.0f};
+    const uni_simd_const_buffer_t failed_reset_input = {failed_reset_sample, 1U};
+    uni_simd_buffer_t zero_capacity = {NULL, 0U};
+    uni_simd_buffer_array_t zero_capacity_outputs = {&zero_capacity, 1U};
+    uni_simd_param_t failed_reset_param = u32_param(UNI_SIMD_PARAM_RESET, 1U);
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, &failed_reset_input,
+                            &zero_capacity_outputs, &failed_reset_param, 1U, &state) ==
+           UNI_SIMD_RESULT_INVALID_SIZE);
+    const float continuation_samples[8] = {10.0f, 0.0f, 20.0f, 0.0f, 30.0f, 0.0f, 40.0f, 0.0f};
+    float continuation_output[2] = {0.0f, 0.0f};
+    const uni_simd_const_buffer_t continuation_input = {continuation_samples, 4U};
+    uni_simd_buffer_t continuation_buffer = {continuation_output, 1U};
+    uni_simd_buffer_array_t continuation_outputs = {&continuation_buffer, 1U};
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, &continuation_input,
+                            &continuation_outputs, NULL, 0U, &state) == UNI_SIMD_RESULT_SUCCESS);
+    assert(fabsf(continuation_output[0] - 40.0f) < 1.0e-6f && fabsf(continuation_output[1]) < 1.0e-6f);
+
     uni_simd_param_t reset_params[] = {u32_param(UNI_SIMD_PARAM_RESET, 1U)};
     assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, NULL, NULL,
                             reset_params, 1U, &state) == UNI_SIMD_RESULT_SUCCESS);
@@ -211,6 +263,18 @@ int main(void) {
     uni_simd_state_free(state);
     state = NULL;
     uni_simd_state_free(NULL);
+
+    create_params[6].value.const_pointer = NULL;
+    create_params[7].value.size = 0U;
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, NULL, NULL,
+                            create_params, 9U, &state) == UNI_SIMD_RESULT_SUCCESS);
+    const uni_simd_const_buffer_t overflowing_input = {
+        pfb_input_samples, SIZE_MAX / (2U * sizeof(float)) + 1U,
+    };
+    assert(uni_simd_execute(UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, &overflowing_input, NULL,
+                            NULL, 0U, &state) == UNI_SIMD_RESULT_INVALID_SIZE);
+    uni_simd_state_free(state);
+    state = NULL;
 
     assert(uni_simd_finalize() == UNI_SIMD_RESULT_SUCCESS);
     assert(uni_simd_finalize() == UNI_SIMD_RESULT_SUCCESS);

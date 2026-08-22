@@ -1,9 +1,9 @@
 #pragma once
 
-#include <uni_simd_export.h>
-#include <uni_simd_kernels.h>
-#include <uni_simd_typedefs.h>
-#include <uni_simd_version.h>
+#include "uni_simd_export.h"
+#include "uni_simd_kernels.h"
+#include "uni_simd_typedefs.h"
+#include "uni_simd_version.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,10 +70,13 @@ UNI_SIMD_API void UNI_SIMD_CALL uni_simd_state_free(uni_simd_state_t* state);
  * - Query: U32 QUERY_OUTPUT_COUNT=1 and a SIZE OUTPUT_COUNT parameter compute
  *   the next output count from input->count without advancing state; output is
  *   ignored and input->data may be NULL.
- * - Reset: U32 RESET=1 clears history before any processing in the same call.
+ * - Reset: U32 RESET=1 clears history immediately before processing, after all
+ *   descriptors and capacities have been validated. Reset and query cannot be
+ *   combined.
  * - Destruction: release the opaque state with uni_simd_state_free().
  *
- * Buffers are borrowed for the duration of the call. Except for COPY_U8 and
+ * Buffers are borrowed for the duration of the call and require their element
+ * type's natural alignment, but no additional SIMD alignment. Except for COPY_U8 and
  * documented exact in-place kernels, active input and output ranges must not
  * overlap. A stateful instance must not be used concurrently.
  */

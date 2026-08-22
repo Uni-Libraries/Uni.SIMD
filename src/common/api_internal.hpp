@@ -81,8 +81,8 @@ struct PfbChannelizerConfig {
 };
 
 struct PfbChannelizerBlock {
-    std::span<const std::complex<float>> input{};
-    std::array<std::span<std::complex<float>>, pfb_channelizer_max_outputs> outputs{};
+    std::span<const float> input{};
+    std::array<std::span<float>, pfb_channelizer_max_outputs> outputs{};
 };
 
 namespace detail {
@@ -118,6 +118,8 @@ private:
 struct IfftSplitComplex {
     std::span<float> real{};
     std::span<float> imag{};
+    std::size_t transform_count = 1U;
+    std::size_t stride = 0U;
 };
 
 class IfftKernel final {

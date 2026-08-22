@@ -26,6 +26,14 @@ struct RunResult final {
     uni::simd::Backend backend = uni::simd::Backend::generic;
 };
 
+[[nodiscard]] std::span<const float> as_components(const std::span<const Complex> values) noexcept {
+    return {reinterpret_cast<const float*>(values.data()), values.size() * 2U};
+}
+
+[[nodiscard]] std::span<float> as_components(const std::span<Complex> values) noexcept {
+    return {reinterpret_cast<float*>(values.data()), values.size() * 2U};
+}
+
 [[nodiscard]] std::vector<float> make_taps(const std::size_t count) {
     std::vector<float> taps(count);
     const float scale = 0.5f / std::sqrt(static_cast<float>(count));
@@ -70,9 +78,12 @@ struct RunResult final {
     do {
         const std::size_t requested = split_pattern.empty() ? input.size() : split_pattern[split_index++ % split_pattern.size()];
         const std::size_t count = std::min(requested, input.size() - input_offset);
-        uni::simd::PfbChannelizerBlock block{.input = input.subspan(input_offset, count)};
+        uni::simd::PfbChannelizerBlock block{
+            .input = as_components(input.subspan(input_offset, count)),
+        };
         for (std::size_t output = 0U; output < result.outputs.size(); ++output) {
-            block.outputs[output] = std::span<Complex>{result.outputs[output]}.subspan(result.produced);
+            block.outputs[output] = as_components(
+                std::span<Complex>{result.outputs[output]}.subspan(result.produced));
         }
         const auto produced = channelizer.process(block);
         assert(produced.has_value());
@@ -164,25 +175,34 @@ void test_validation(const uni::simd::Context& generic) {
     const auto input = make_input(17U);
     std::array<Complex, 4U> short_output{};
     std::array<Complex, 5U> full_output{};
-    uni::simd::PfbChannelizerBlock short_block{.input = input};
-    short_block.outputs[0] = short_output;
-    short_block.outputs[1] = full_output;
+    uni::simd::PfbChannelizerBlock short_block{.input = as_components(std::span<const Complex>{input})};
+    short_block.outputs[0] = as_components(std::span<Complex>{short_output});
+    short_block.outputs[1] = as_components(std::span<Complex>{full_output});
     const auto short_result = channelizer->process(short_block);
     assert(!short_result && short_result.error() == uni::simd::Result::invalid_size);
 
     std::array<Complex, 5U> shared{};
-    uni::simd::PfbChannelizerBlock overlap{.input = input};
-    overlap.outputs[0] = shared;
-    overlap.outputs[1] = shared;
+    uni::simd::PfbChannelizerBlock overlap{.input = as_components(std::span<const Complex>{input})};
+    overlap.outputs[0] = as_components(std::span<Complex>{shared});
+    overlap.outputs[1] = as_components(std::span<Complex>{shared});
     const auto overlap_result = channelizer->process(overlap);
     assert(!overlap_result && overlap_result.error() == uni::simd::Result::overlapping_buffers);
 
     auto aliased_input = make_input(17U);
-    uni::simd::PfbChannelizerBlock input_overlap{.input = aliased_input};
-    input_overlap.outputs[0] = std::span<Complex>{aliased_input}.first(5U);
-    input_overlap.outputs[1] = full_output;
+    uni::simd::PfbChannelizerBlock input_overlap{
+        .input = as_components(std::span<const Complex>{aliased_input}),
+    };
+    input_overlap.outputs[0] = as_components(std::span<Complex>{aliased_input}.first(5U));
+    input_overlap.outputs[1] = as_components(std::span<Complex>{full_output});
     const auto input_overlap_result = channelizer->process(input_overlap);
     assert(!input_overlap_result && input_overlap_result.error() == uni::simd::Result::overlapping_buffers);
+
+    std::array<float, 3U> odd_components{};
+    uni::simd::PfbChannelizerBlock odd_block{.input = odd_components};
+    odd_block.outputs[0] = as_components(std::span<Complex>{full_output});
+    odd_block.outputs[1] = as_components(std::span<Complex>{short_output});
+    const auto odd_result = channelizer->process(odd_block);
+    assert(!odd_result && odd_result.error() == uni::simd::Result::invalid_size);
 }
 
 void test_scalar_reference(const uni::simd::Context& generic) {
@@ -205,6 +225,15 @@ void test_scalar_reference(const uni::simd::Context& generic) {
                 }
             }
         }
+    }
+    constexpr std::array<std::int32_t, 1U> selected{-2};
+    const auto taps = make_taps(33U);
+    for (const auto grid : {uni::simd::PfbGridOffset::integer_bins,
+                            uni::simd::PfbGridOffset::half_bins}) {
+        const uni::simd::PfbChannelizerConfig config{
+            .bin_count = 8U, .decimation = 4U, .grid_offset = grid,
+            .taps = taps, .logical_bins = selected};
+        compare_reference(run(generic, config, input), direct_reference(config, input));
     }
 }
 
@@ -251,18 +280,47 @@ void test_dispatch(const uni::simd::Context& generic) {
         const auto split = run(*context, accelerated, input, splits);
         assert(actual.outputs == split.outputs);
 
+        const auto compare_accelerated = [&](const uni::simd::PfbChannelizerConfig& config) {
+            const auto generic_result = run(generic, config, input);
+            const auto accelerated_result = run(*context, config, input);
+            assert(accelerated_result.backend == backend);
+            compare_runs(generic_result, accelerated_result);
+            const auto fragmented = run(*context, config, input, splits);
+            assert(accelerated_result.outputs == fragmented.outputs);
+        };
+        for (const std::size_t tap_count : {168U, 170U}) {
+            const auto general_taps = make_taps(tap_count);
+            compare_accelerated({.bin_count = 8U, .decimation = 4U,
+                                 .grid_offset = uni::simd::PfbGridOffset::half_bins,
+                                 .taps = general_taps, .logical_bins = bins});
+        }
+        constexpr std::array<std::int32_t, 1U> one_bin{3};
+        const auto short_taps = make_taps(33U);
+        compare_accelerated({.bin_count = 8U, .decimation = 4U,
+                             .grid_offset = uni::simd::PfbGridOffset::integer_bins,
+                             .taps = short_taps, .logical_bins = one_bin});
+        constexpr std::array<std::int32_t, 8U> all_bins{-4, -3, -2, -1, 0, 1, 2, 3};
+        const auto maximum_taps = make_taps(uni::simd::pfb_channelizer_max_taps);
+        compare_accelerated({.bin_count = 8U, .decimation = 4U,
+                             .grid_offset = uni::simd::PfbGridOffset::integer_bins,
+                             .taps = maximum_taps, .logical_bins = all_bins});
+
         auto reset_channelizer = context->make_pfb_channelizer(accelerated);
         assert(reset_channelizer.has_value());
         const std::size_t count = *reset_channelizer->output_count(input.size());
         std::array<std::vector<Complex>, 4U> first_outputs;
         std::array<std::vector<Complex>, 4U> second_outputs;
-        uni::simd::PfbChannelizerBlock first_block{.input = input};
-        uni::simd::PfbChannelizerBlock second_block{.input = input};
+        uni::simd::PfbChannelizerBlock first_block{
+            .input = as_components(std::span<const Complex>{input}),
+        };
+        uni::simd::PfbChannelizerBlock second_block{
+            .input = as_components(std::span<const Complex>{input}),
+        };
         for (std::size_t output = 0U; output < first_outputs.size(); ++output) {
             first_outputs[output].resize(count);
             second_outputs[output].resize(count);
-            first_block.outputs[output] = first_outputs[output];
-            second_block.outputs[output] = second_outputs[output];
+            first_block.outputs[output] = as_components(std::span<Complex>{first_outputs[output]});
+            second_block.outputs[output] = as_components(std::span<Complex>{second_outputs[output]});
         }
         assert(reset_channelizer->process(first_block) == count);
         assert(reset_channelizer->reset() == uni::simd::Result::success);

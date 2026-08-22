@@ -34,6 +34,8 @@ struct PfbChannelizerData final {
     std::array<float, pfb_channelizer_max_bins> branch_rotation_im{};
     std::vector<float> post_phase_re;
     std::vector<float> post_phase_im;
+    std::vector<float> selected_transform_re;
+    std::vector<float> selected_transform_im;
     std::vector<float> history;
     std::size_t cursor = 0U;
     std::size_t decimation_phase = 0U;
@@ -65,6 +67,12 @@ struct PfbChannelizerAccess final {
     }
     [[nodiscard]] static const float* post_phase_im(const PfbChannelizerData& data) noexcept {
         return data.post_phase_im.data();
+    }
+    [[nodiscard]] static const float* selected_transform_re(const PfbChannelizerData& data) noexcept {
+        return data.selected_transform_re.data();
+    }
+    [[nodiscard]] static const float* selected_transform_im(const PfbChannelizerData& data) noexcept {
+        return data.selected_transform_im.data();
     }
     [[nodiscard]] static std::size_t cursor(const PfbChannelizerData& data) noexcept { return data.cursor; }
     [[nodiscard]] static std::size_t decimation_phase(const PfbChannelizerData& data) noexcept {
@@ -119,6 +127,12 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, PfbChannelizerFn c
         return {-phase_im * imag, phase_im * real};
     }
     return {real * phase_re - imag * phase_im, real * phase_im + imag * phase_re};
+}
+
+inline void pfb_store_output(const std::span<float> output, const std::size_t index,
+                             const std::complex<float> value) noexcept {
+    output[2U * index] = value.real();
+    output[2U * index + 1U] = value.imag();
 }
 
 } // namespace uni::simd::detail

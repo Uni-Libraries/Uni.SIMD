@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.26)
 
-project(UniSIMD VERSION 0.3.0 LANGUAGES C CXX)
+project(UniSIMD VERSION 0.4.0 LANGUAGES C CXX)
 
-set(UNI_SIMD_ABI_VERSION 3)
+set(UNI_SIMD_ABI_VERSION 4)
 
 include(GNUInstallDirs)
 

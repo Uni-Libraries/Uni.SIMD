@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace uni::simd {
 
@@ -9,16 +10,29 @@ Result IfftKernel::execute(const IfftSplitComplex values) const noexcept {
     if (function_ == nullptr) {
         return Result::invalid_argument;
     }
-    if (values.real.size() != size_ || values.imag.size() != size_) {
+    const std::size_t stride = values.stride == 0U ? size_ : values.stride;
+    if (values.transform_count == 0U) {
+        return Result::success;
+    }
+    if (stride < size_ || values.transform_count - 1U >
+                              (std::numeric_limits<std::size_t>::max() - size_) / stride) {
+        return Result::invalid_size;
+    }
+    const std::size_t required = (values.transform_count - 1U) * stride + size_;
+    if (required > std::numeric_limits<std::size_t>::max() / sizeof(float) ||
+        values.real.size() < required || values.imag.size() < required) {
         return Result::invalid_size;
     }
     const auto real_begin = reinterpret_cast<std::uintptr_t>(values.real.data());
     const auto imag_begin = reinterpret_cast<std::uintptr_t>(values.imag.data());
-    if (real_begin < imag_begin + values.imag.size_bytes() &&
-        imag_begin < real_begin + values.real.size_bytes()) {
+    const std::size_t required_bytes = required * sizeof(float);
+    if (real_begin <= imag_begin ? imag_begin - real_begin < required_bytes
+                                 : real_begin - imag_begin < required_bytes) {
         return Result::overlapping_buffers;
     }
-    function_(values.real.data(), values.imag.data(), size_);
+    for (std::size_t transform = 0U; transform < values.transform_count; ++transform) {
+        function_(values.real.data() + transform * stride, values.imag.data() + transform * stride, size_);
+    }
     return Result::success;
 }
 

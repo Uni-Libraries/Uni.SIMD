@@ -17,15 +17,12 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 static_assert(static_cast<unsigned>(uni::simd::Backend::automatic) == UNI_SIMD_BACKEND_AUTOMATIC);
 static_assert(static_cast<unsigned>(uni::simd::Backend::neon) == UNI_SIMD_BACKEND_AARCH64_NEON);
 
 struct uni_simd_state_t final {
     uni::simd::PfbChannelizer pfb;
-    std::vector<std::complex<float>> input_scratch;
-    std::array<std::vector<std::complex<float>>, uni::simd::pfb_channelizer_max_outputs> output_scratch;
 };
 
 namespace {
@@ -426,14 +423,29 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
         auto& split = *static_cast<uni_simd_split_cf32_t*>(output);
-        if ((split.count != 0U && (split.real == nullptr || split.imag == nullptr))) {
+        if (split.descriptor_size != sizeof(uni_simd_split_cf32_t)) {
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
-        const auto ifft = context.make_ifft_cf32(split.count);
+        if (split.transform_count != 0U && (split.real == nullptr || split.imag == nullptr)) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        const auto ifft = context.make_ifft_cf32(split.transform_size);
         if (!ifft) {
             return to_c(ifft.error());
         }
-        const auto result = ifft->execute({.real = {split.real, split.count}, .imag = {split.imag, split.count}});
+        const std::size_t stride = split.stride == 0U ? split.transform_size : split.stride;
+        if (split.transform_count != 0U &&
+            (stride < split.transform_size || split.transform_count - 1U >
+                 (std::numeric_limits<std::size_t>::max() - split.transform_size) / stride)) {
+            return UNI_SIMD_RESULT_INVALID_SIZE;
+        }
+        const std::size_t required = split.transform_count == 0U
+                                         ? 0U
+                                         : (split.transform_count - 1U) * stride + split.transform_size;
+        const auto result = ifft->execute({.real = {split.real, required},
+                                           .imag = {split.imag, required},
+                                           .transform_count = split.transform_count,
+                                           .stride = split.stride});
         if (result == uni::simd::Result::success) {
             set_resolved_backend(params, ifft->backend());
         }
@@ -578,15 +590,18 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
         commit_pending_state();
         return UNI_SIMD_RESULT_SUCCESS;
     };
-    if (params.reset) {
-        const auto result = active.pfb.reset();
-        if (result != uni::simd::Result::success) {
-            return to_c(result);
-        }
+    if (params.reset && params.query_output_count) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
     if (input == nullptr) {
         if (output != nullptr || params.query_output_count || (!pending_state && !params.reset)) {
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (params.reset) {
+            const auto result = active.pfb.reset();
+            if (result != uni::simd::Result::success) {
+                return to_c(result);
+            }
         }
         if (params.output_count != nullptr) {
             params.output_count->value.size = 0U;
@@ -598,22 +613,42 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     if (!params.query_output_count && !valid_read_buffer(src)) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
-    const auto expected = active.pfb.output_count(src.count);
+    const auto expected = params.reset
+                              ? std::expected<std::size_t, uni::simd::Result>{
+                                    src.count == 0U ? 0U : 1U + (src.count - 1U) / active.pfb.decimation()}
+                              : active.pfb.output_count(src.count);
     if (!expected) {
         return to_c(expected.error());
     }
     if (params.query_output_count) {
-        if (params.output_count != nullptr) {
-            params.output_count->value.size = *expected;
-        }
-        return complete_success();
-    }
-    if (output == nullptr) {
-        if (*expected != 0U || !active.pfb.logical_bins().empty()) {
+        if (params.output_count == nullptr) {
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
+        params.output_count->value.size = *expected;
+        return complete_success();
+    }
+    if (src.count > std::numeric_limits<std::size_t>::max() / (2U * sizeof(float))) {
+        return UNI_SIMD_RESULT_INVALID_SIZE;
+    }
+    if (output == nullptr) {
+        if (!active.pfb.logical_bins().empty()) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (params.reset) {
+            const auto result = active.pfb.reset();
+            if (result != uni::simd::Result::success) {
+                return to_c(result);
+            }
+        }
+        uni::simd::PfbChannelizerBlock block{
+            .input = {static_cast<const float*>(src.data), src.count * 2U},
+        };
+        const auto produced = active.pfb.process(block);
+        if (!produced) {
+            return to_c(produced.error());
+        }
         if (params.output_count != nullptr) {
-            params.output_count->value.size = 0U;
+            params.output_count->value.size = *produced;
         }
         return complete_success();
     }
@@ -621,7 +656,6 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     auto& destinations = *static_cast<uni_simd_buffer_array_t*>(output);
     if (destinations.count != active.pfb.logical_bins().size() ||
         (destinations.count != 0U && destinations.buffers == nullptr) ||
-        src.count > std::numeric_limits<std::size_t>::max() / (2U * sizeof(float)) ||
         *expected > std::numeric_limits<std::size_t>::max() / (2U * sizeof(float))) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
@@ -642,26 +676,22 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
         }
     }
 
-    active.input_scratch.resize(src.count);
-    const auto* const components = static_cast<const float*>(src.data);
-    for (std::size_t index = 0U; index < src.count; ++index) {
-        active.input_scratch[index] = {components[2U * index], components[2U * index + 1U]};
+    if (params.reset) {
+        const auto result = active.pfb.reset();
+        if (result != uni::simd::Result::success) {
+            return to_c(result);
+        }
     }
-    uni::simd::PfbChannelizerBlock block{.input = active.input_scratch};
+    uni::simd::PfbChannelizerBlock block{
+        .input = {static_cast<const float*>(src.data), src.count * 2U},
+    };
     for (std::size_t output_index = 0U; output_index < destinations.count; ++output_index) {
-        active.output_scratch[output_index].resize(*expected);
-        block.outputs[output_index] = active.output_scratch[output_index];
+        block.outputs[output_index] = {
+            static_cast<float*>(destinations.buffers[output_index].data), *expected * 2U};
     }
     const auto produced = active.pfb.process(block);
     if (!produced) {
         return to_c(produced.error());
-    }
-    for (std::size_t output_index = 0U; output_index < destinations.count; ++output_index) {
-        auto* const components_out = static_cast<float*>(destinations.buffers[output_index].data);
-        for (std::size_t index = 0U; index < *produced; ++index) {
-            components_out[2U * index] = active.output_scratch[output_index][index].real();
-            components_out[2U * index + 1U] = active.output_scratch[output_index][index].imag();
-        }
     }
     if (params.output_count != nullptr) {
         params.output_count->value.size = *produced;

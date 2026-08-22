@@ -91,6 +91,13 @@ enum class BackendPolicy : std::uint8_t {
     runtime_only,
 };
 
+enum class PfbBenchmarkProfile : std::uint8_t {
+    single_output,
+    target_169,
+    general_170,
+    short_33,
+};
+
 enum Requirement : std::uint32_t {
     requirement_none = 0U,
     requirement_scale = 1U << 0U,
@@ -111,6 +118,7 @@ struct KernelDescription {
     BackendPolicy backend_policy;
     std::size_t configuration = 0U;
     bool all_profiles = true;
+    PfbBenchmarkProfile pfb_profile = PfbBenchmarkProfile::single_output;
 };
 
 constexpr std::array kKernelDescriptions{
@@ -153,10 +161,18 @@ constexpr std::array kKernelDescriptions{
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
                       BackendPolicy::dispatched, 4U},
-    KernelDescription{"pfb_channelizer_cf32_8", "eight-bin streaming PFB channelizer",
+    KernelDescription{"pfb_cf32_8_target169", "eight-bin target profile: 169 taps, four half-grid outputs",
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
-                      BackendPolicy::dispatched, 8U},
+                      BackendPolicy::dispatched, 8U, true, PfbBenchmarkProfile::target_169},
+    KernelDescription{"pfb_cf32_8_general170", "eight-bin general path: 170 taps, four half-grid outputs",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 8U, true, PfbBenchmarkProfile::general_170},
+    KernelDescription{"pfb_cf32_8_short33", "eight-bin short filter: 33 taps, one integer-grid output",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 8U, true, PfbBenchmarkProfile::short_33},
     KernelDescription{"pfb_channelizer_cf32_16", "sixteen-bin streaming PFB channelizer",
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
@@ -617,14 +633,20 @@ public:
                 u32_parameter(UNI_SIMD_PARAM_RESOLVED_BACKEND, UNI_SIMD_BACKEND_AUTOMATIC),
                 size_parameter(UNI_SIMD_PARAM_BIN_COUNT, description_.configuration),
                 size_parameter(UNI_SIMD_PARAM_DECIMATION, description_.configuration / 2U),
-                u32_parameter(UNI_SIMD_PARAM_GRID_OFFSET, description_.configuration == 8U
-                                                               ? UNI_SIMD_PFB_HALF_BINS
-                                                               : UNI_SIMD_PFB_INTEGER_BINS),
+                u32_parameter(UNI_SIMD_PARAM_GRID_OFFSET,
+                              description_.pfb_profile == PfbBenchmarkProfile::target_169 ||
+                                      description_.pfb_profile == PfbBenchmarkProfile::general_170
+                                  ? UNI_SIMD_PFB_HALF_BINS
+                                  : UNI_SIMD_PFB_INTEGER_BINS),
                 pointer_parameter(UNI_SIMD_PARAM_TAPS, taps_[lane].data()),
                 size_parameter(UNI_SIMD_PARAM_TAP_COUNT, taps_[lane].size()),
-                pointer_parameter(UNI_SIMD_PARAM_LOGICAL_BINS, description_.configuration == 8U
-                                                                       ? pfb_logical_bins_.data()
-                                                                       : &pfb_zero_bin_),
+                pointer_parameter(UNI_SIMD_PARAM_LOGICAL_BINS,
+                                  description_.pfb_profile == PfbBenchmarkProfile::target_169 ||
+                                          description_.pfb_profile == PfbBenchmarkProfile::general_170
+                                      ? pfb_logical_bins_.data()
+                                      : description_.pfb_profile == PfbBenchmarkProfile::short_33
+                                            ? &pfb_three_bin_
+                                            : &pfb_zero_bin_),
                 size_parameter(UNI_SIMD_PARAM_LOGICAL_BIN_COUNT, pfb_output_count()),
             };
             uni_simd_state_t* state = nullptr;
@@ -644,20 +666,16 @@ public:
     [[nodiscard]] uni_simd_result_e execute(const std::size_t lane) {
         auto& invocation = invocations_.at(lane);
         if (description_.shape == WorkloadShape::ifft) {
-            for (std::size_t offset = 0U; offset < item_count_; offset += description_.configuration) {
-                uni_simd_split_cf32_t values{
-                    .real = ifft_real_[lane].data() + offset,
-                    .imag = ifft_imag_[lane].data() + offset,
-                    .count = description_.configuration,
-                };
-                const uni_simd_result_e result = uni_simd_execute(
-                    description_.kernel, nullptr, &values,
-                    invocation.parameters.data(), invocation.parameter_count, nullptr);
-                if (result != UNI_SIMD_RESULT_SUCCESS) {
-                    return result;
-                }
-            }
-            return UNI_SIMD_RESULT_SUCCESS;
+            uni_simd_split_cf32_t values{
+                .real = ifft_real_[lane].data(),
+                .imag = ifft_imag_[lane].data(),
+                .descriptor_size = UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE,
+                .transform_size = description_.configuration,
+                .transform_count = item_count_ / description_.configuration,
+                .stride = description_.configuration,
+            };
+            return uni_simd_execute(description_.kernel, nullptr, &values,
+                                    invocation.parameters.data(), invocation.parameter_count, nullptr);
         }
         if (description_.shape == WorkloadShape::pfb) {
             uni_simd_state_t* state = states_[lane].get();
@@ -806,13 +824,18 @@ private:
             item_count_ = std::max<std::size_t>(
                 decimation * 8U,
                 profile_.working_set_bytes * decimation /
-                    (4U * sizeof(float) * (decimation + output_count)));
+                    (2U * sizeof(float) * (decimation + output_count)));
             item_count_ -= item_count_ % decimation;
             f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
             f32_outputs_ = make_lanes<float>(lanes, item_count_ / decimation * 2U * output_count);
-            taps_ = make_lanes<float>(lanes, description_.configuration == 8U
-                                                 ? 169U
-                                                 : description_.configuration * 8U);
+            const std::size_t tap_count = description_.pfb_profile == PfbBenchmarkProfile::target_169
+                                              ? 169U
+                                          : description_.pfb_profile == PfbBenchmarkProfile::general_170
+                                              ? 170U
+                                          : description_.pfb_profile == PfbBenchmarkProfile::short_33
+                                              ? 33U
+                                              : description_.configuration * 8U;
+            taps_ = make_lanes<float>(lanes, tap_count);
             states_.resize(lanes);
             pfb_output_buffers_.resize(lanes);
             for (auto& buffers : pfb_output_buffers_) {
@@ -932,7 +955,10 @@ private:
     }
 
     [[nodiscard]] std::size_t pfb_output_count() const noexcept {
-        return description_.configuration == 8U ? pfb_logical_bins_.size() : 1U;
+        return description_.pfb_profile == PfbBenchmarkProfile::target_169 ||
+                       description_.pfb_profile == PfbBenchmarkProfile::general_170
+                   ? pfb_logical_bins_.size()
+                   : 1U;
     }
 
     void require_success(const uni_simd_result_e result, const std::string_view phase) const {
@@ -964,6 +990,7 @@ private:
     std::vector<uni_simd_buffer_array_t> pfb_output_arrays_;
     std::array<std::int32_t, 4U> pfb_logical_bins_{-2, -1, 0, 1};
     std::int32_t pfb_zero_bin_ = 0;
+    std::int32_t pfb_three_bin_ = 3;
 };
 
 [[nodiscard]] std::string table_border(const std::span<const std::size_t> widths, const char fill = '-') {
@@ -1242,7 +1269,7 @@ void print_topology_table(const Config& config, const topology::Result& result,
                                                  config.iterations, config.warmup, config.sample_milliseconds));
     print_summary_row("Buffers", fmt::format("{}-byte aligned; address lanes={}", kBufferAlignment, address_lanes));
     print_summary_row("Cache policy", "rotate addresses; prewarm through 32 MiB; stream 64 MiB");
-    print_summary_row("PFB working set", "payload plus equal-sized C API conversion scratch; GiB/s reports payload");
+    print_summary_row("PFB working set", "caller payload only; kernels process interleaved buffers directly");
     fmt::print("{}\n\n", summary_border);
 
     constexpr std::array<std::size_t, 8U> core_widths{3U, 10U, 7U, 31U, 7U, 7U, 7U, 7U};

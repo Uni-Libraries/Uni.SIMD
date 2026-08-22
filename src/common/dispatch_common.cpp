@@ -510,7 +510,7 @@ Context::make_pfb_channelizer(const PfbChannelizerConfig& config) const noexcept
 
 std::expected<IfftKernel, Result> Context::make_ifft_cf32(const std::size_t size) const noexcept {
     if (!kernels::Ifft_supports_all(size)) {
-        return std::unexpected(Result::invalid_argument);
+        return std::unexpected(Result::invalid_size);
     }
     IfftKernel kernel;
     if (ifft_support_(size)) {

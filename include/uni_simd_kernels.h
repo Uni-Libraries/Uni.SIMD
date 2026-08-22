@@ -6,8 +6,9 @@
  * Operations accepted by uni_simd_execute().
  *
  * Unless stated otherwise, input points to uni_simd_const_buffer_t, output
- * points to uni_simd_buffer_t, buffers are unaligned, and count is an element
- * count rather than a byte count. Empty buffers are valid no-ops.
+ * points to uni_simd_buffer_t, buffers require only natural element alignment
+ * (no SIMD alignment), and count is an element count rather than a byte count.
+ * Empty buffers are valid no-ops.
  */
 typedef uint32_t uni_simd_kernel_e;
 enum {
@@ -70,8 +71,9 @@ enum {
     UNI_SIMD_KERNEL_DOT_SYMMETRIC_CF32_F32 = 12,
 
     /**
-     * Executes an unscaled positive-exponent IFFT in place. Input is NULL and
-     * output points to uni_simd_split_cf32_t. Supported counts: 4, 8, 16, 32.
+     * Executes one or more unscaled positive-exponent IFFTs in place. Input is
+     * NULL and output points to uni_simd_split_cf32_t. Supported transform
+     * sizes: 4, 8, 16, 32. Batches are dispatched once and may be strided.
      */
     UNI_SIMD_KERNEL_IFFT_SPLIT_CF32 = 13,
 

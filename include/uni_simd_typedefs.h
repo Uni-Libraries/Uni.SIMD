@@ -141,12 +141,22 @@ typedef struct uni_simd_buffer_array_t {
     size_t count;
 } uni_simd_buffer_array_t;
 
-/** Mutable split-complex storage used by the in-place IFFT kernel. */
+/**
+ * Mutable split-complex storage used by the batched in-place IFFT kernel.
+ * stride is measured in float elements; zero selects transform_size. A zero
+ * transform_count is a valid no-op and permits NULL data pointers.
+ */
 typedef struct uni_simd_split_cf32_t {
     float* real;
     float* imag;
-    size_t count;
+    size_t descriptor_size;
+    size_t transform_size;
+    size_t transform_count;
+    size_t stride;
 } uni_simd_split_cf32_t;
+
+/** Current value required in uni_simd_split_cf32_t::descriptor_size. */
+#define UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE sizeof(uni_simd_split_cf32_t)
 
 /** Typed parameter. IDs are unique within one call; duplicate IDs are invalid. */
 typedef struct uni_simd_param_t {

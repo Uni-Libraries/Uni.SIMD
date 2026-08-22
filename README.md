@@ -68,6 +68,33 @@ select a backend and math mode or report the resolved backend. Kernel-specific
 parameters carry values such as scale, taps, normalization, and PFB
 configuration. Duplicate IDs and mismatched runtime types are rejected.
 
+### Batched IFFT
+
+IFFT is an in-place, unscaled, positive-exponent transform over split-complex
+`float` storage. One call can process a contiguous or strided batch, avoiding
+runtime locking, parameter parsing, and dispatch for every small transform:
+
+```c
+float real[16] = {1.0f};
+float imag[16] = {0.0f};
+uni_simd_split_cf32_t transforms = {
+    .real = real,
+    .imag = imag,
+    .descriptor_size = UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE,
+    .transform_size = 8,
+    .transform_count = 2,
+    .stride = 8,
+};
+
+uni_simd_result_e result = uni_simd_execute(
+    UNI_SIMD_KERNEL_IFFT_SPLIT_CF32,
+    NULL, &transforms, NULL, 0, NULL);
+```
+
+Supported transform sizes are 4, 8, 16, and 32. `stride` is measured in float
+elements and must be at least the transform size; zero means tightly packed.
+A zero transform count is a valid no-op.
+
 ## State
 
 All primitive and IFFT kernels are stateless. The streaming PFB channelizer is
@@ -85,6 +112,22 @@ unique logical bins in `[-M/2, M/2-1]`. Taps are newest-first, initial history i
 zero, and the first output is emitted for input sample zero. There is no
 end-of-stream flush operation.
 
+For bin `b`, grid offset `delta` (`0` or `0.5`), decimation `D`, and hop `h`,
+the channelizer computes the following unscaled output, with samples before the
+start of the stream treated as zero:
+
+```text
+y_b[h] = sum_k taps[k] * input[h*D-k]
+         * exp(-i*2*pi*(b+delta)*(h*D-k)/M)
+```
+
+Input and output use interleaved `{real, imaginary}` floats and are processed
+directly without internal block-sized conversion buffers. Configuration and
+coefficient tables are copied at state creation; steady-state processing does
+not allocate. A failed processing call does not reset or advance state. A state
+is single-stream and must not be used concurrently, while separate states and
+stateless IFFT calls may run concurrently.
+
 ## Benchmarks
 
 ```sh
@@ -96,4 +139,6 @@ The default quick run uses three iterations, one warmup batch, and 1 ms samples;
 all values can be overridden with command-line options. The benchmark requires
 an optimized build, validates every unique available implementation against
 generic output before timing, includes PFB and IFFT table entries, and runs once
-per detected core class with thread affinity.
+per detected core class with thread affinity. IFFT entries use batched dispatch;
+PFB bandwidth includes only caller-visible payload because processing has no
+conversion scratch.

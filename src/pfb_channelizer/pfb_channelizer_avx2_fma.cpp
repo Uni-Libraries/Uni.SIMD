@@ -19,8 +19,42 @@ struct ScalarComplex {
     return _mm256_permutevar8x32_ps(value, reverse);
 }
 
-[[nodiscard]] inline std::complex<float> multiply_i(const ScalarComplex value, const float sign) noexcept {
+[[nodiscard]] inline ScalarComplex multiply_i(const ScalarComplex value, const float sign) noexcept {
     return {-sign * value.imag, sign * value.real};
+}
+
+inline void store_complex(float* const output, const std::size_t index,
+                          const ScalarComplex value) noexcept {
+    output[2U * index] = value.real;
+    output[2U * index + 1U] = value.imag;
+}
+
+inline void emit_target_values(const ScalarComplex value0, const ScalarComplex value1,
+                               const ScalarComplex value2, const ScalarComplex value3,
+                               float* const output0, float* const output1,
+                               float* const output2, float* const output3,
+                               const std::size_t output_index, const std::size_t phase) noexcept {
+    if (phase == 0U) {
+        store_complex(output0, output_index, value0);
+        store_complex(output1, output_index, value1);
+        store_complex(output2, output_index, value2);
+        store_complex(output3, output_index, value3);
+    } else if (phase == 1U) {
+        store_complex(output0, output_index, multiply_i(value0, -1.0f));
+        store_complex(output1, output_index, multiply_i(value1, 1.0f));
+        store_complex(output2, output_index, multiply_i(value2, -1.0f));
+        store_complex(output3, output_index, multiply_i(value3, 1.0f));
+    } else if (phase == 2U) {
+        store_complex(output0, output_index, {-value0.real, -value0.imag});
+        store_complex(output1, output_index, {-value1.real, -value1.imag});
+        store_complex(output2, output_index, {-value2.real, -value2.imag});
+        store_complex(output3, output_index, {-value3.real, -value3.imag});
+    } else {
+        store_complex(output0, output_index, multiply_i(value0, 1.0f));
+        store_complex(output1, output_index, multiply_i(value1, -1.0f));
+        store_complex(output2, output_index, multiply_i(value2, 1.0f));
+        store_complex(output3, output_index, multiply_i(value3, -1.0f));
+    }
 }
 
 [[nodiscard]] inline bool is_target_four(const PfbChannelizerData& plan) noexcept {
@@ -32,8 +66,7 @@ struct ScalarComplex {
 
 inline void emit_target_hop(const __m256 accumulated_reversed_re, const __m256 accumulated_reversed_im,
                             const __m256 rotation_re, const __m256 rotation_im,
-                            std::complex<float>* output0, std::complex<float>* output1,
-                            std::complex<float>* output2, std::complex<float>* output3,
+                            float* output0, float* output1, float* output2, float* output3,
                             const std::size_t output_index, const std::size_t phase) noexcept {
     const __m256 accumulator_re = reverse_lanes(accumulated_reversed_re);
     const __m256 accumulator_im = reverse_lanes(accumulated_reversed_im);
@@ -51,34 +84,14 @@ inline void emit_target_hop(const __m256 accumulated_reversed_re, const __m256 a
     const ScalarComplex value1{fft_re[7], fft_im[7]};
     const ScalarComplex value2{fft_re[0], fft_im[0]};
     const ScalarComplex value3{fft_re[1], fft_im[1]};
-    if (phase == 0U) {
-        output0[output_index] = {value0.real, value0.imag};
-        output1[output_index] = {value1.real, value1.imag};
-        output2[output_index] = {value2.real, value2.imag};
-        output3[output_index] = {value3.real, value3.imag};
-    } else if (phase == 1U) {
-        output0[output_index] = multiply_i(value0, -1.0f);
-        output1[output_index] = multiply_i(value1, 1.0f);
-        output2[output_index] = multiply_i(value2, -1.0f);
-        output3[output_index] = multiply_i(value3, 1.0f);
-    } else if (phase == 2U) {
-        output0[output_index] = {-value0.real, -value0.imag};
-        output1[output_index] = {-value1.real, -value1.imag};
-        output2[output_index] = {-value2.real, -value2.imag};
-        output3[output_index] = {-value3.real, -value3.imag};
-    } else {
-        output0[output_index] = multiply_i(value0, 1.0f);
-        output1[output_index] = multiply_i(value1, -1.0f);
-        output2[output_index] = multiply_i(value2, 1.0f);
-        output3[output_index] = multiply_i(value3, -1.0f);
-    }
+    emit_target_values(value0, value1, value2, value3, output0, output1,
+                       output2, output3, output_index, phase);
 }
 
 inline void process_target_hop(const float* coefficients, const float* history_i, const float* history_q,
                                const std::size_t history_size, const std::size_t cursor,
                                const __m256 rotation_re, const __m256 rotation_im,
-                               std::complex<float>* output0, std::complex<float>* output1,
-                               std::complex<float>* output2, std::complex<float>* output3,
+                               float* output0, float* output1, float* output2, float* output3,
                                const std::size_t output_index, const std::size_t phase) noexcept {
     __m256 accumulator_re = _mm256_setzero_ps();
     __m256 accumulator_im = _mm256_setzero_ps();
@@ -98,8 +111,7 @@ inline void process_four_target_hops(const float* coefficients, const float* his
                                      const float* history_q, const std::size_t history_size,
                                      const std::array<std::size_t, 4U>& cursors,
                                      const __m256 rotation_re, const __m256 rotation_im,
-                                     std::complex<float>* output0, std::complex<float>* output1,
-                                     std::complex<float>* output2, std::complex<float>* output3,
+                                      float* output0, float* output1, float* output2, float* output3,
                                      const std::size_t output_index, const std::size_t first_phase) noexcept {
     __m256 accumulator_re0 = _mm256_setzero_ps();
     __m256 accumulator_re1 = _mm256_setzero_ps();
@@ -164,9 +176,9 @@ inline void process_four_target_hops(const float* coefficients, const float* his
     auto* output2 = block.outputs[2].data();
     auto* output3 = block.outputs[3].data();
 
-    for (const auto sample : block.input) {
-        const float sample_re = sample.real();
-        const float sample_im = sample.imag();
+    for (std::size_t input_index = 0U; input_index < block.input.size() / 2U; ++input_index) {
+        const float sample_re = block.input[2U * input_index];
+        const float sample_im = block.input[2U * input_index + 1U];
         history_i[cursor] = sample_re;
         history_i[cursor + history_size] = sample_re;
         history_q[cursor] = sample_im;
@@ -246,9 +258,9 @@ std::size_t PfbChannelizer_avx2fma(PfbChannelizerData& data, const PfbChannelize
     alignas(32) std::array<float, pfb_channelizer_max_bins> fft_re{};
     alignas(32) std::array<float, pfb_channelizer_max_bins> fft_im{};
 
-    for (const auto sample : block.input) {
-        const float sample_re = sample.real();
-        const float sample_im = sample.imag();
+    for (std::size_t input_index = 0U; input_index < block.input.size() / 2U; ++input_index) {
+        const float sample_re = block.input[2U * input_index];
+        const float sample_im = block.input[2U * input_index + 1U];
         history_i[cursor] = sample_re;
         history_i[cursor + history_size] = sample_re;
         history_q[cursor] = sample_im;
@@ -304,32 +316,15 @@ std::size_t PfbChannelizer_avx2fma(PfbChannelizerData& data, const PfbChannelize
                     const ScalarComplex value1{fft_re[7], fft_im[7]};
                     const ScalarComplex value2{fft_re[0], fft_im[0]};
                     const ScalarComplex value3{fft_re[1], fft_im[1]};
-                    if (post_phase == 0U) {
-                        target_output0[produced] = {value0.real, value0.imag};
-                        target_output1[produced] = {value1.real, value1.imag};
-                        target_output2[produced] = {value2.real, value2.imag};
-                        target_output3[produced] = {value3.real, value3.imag};
-                    } else if (post_phase == 1U) {
-                        target_output0[produced] = multiply_i(value0, -1.0f);
-                        target_output1[produced] = multiply_i(value1, 1.0f);
-                        target_output2[produced] = multiply_i(value2, -1.0f);
-                        target_output3[produced] = multiply_i(value3, 1.0f);
-                    } else if (post_phase == 2U) {
-                        target_output0[produced] = {-value0.real, -value0.imag};
-                        target_output1[produced] = {-value1.real, -value1.imag};
-                        target_output2[produced] = {-value2.real, -value2.imag};
-                        target_output3[produced] = {-value3.real, -value3.imag};
-                    } else {
-                        target_output0[produced] = multiply_i(value0, 1.0f);
-                        target_output1[produced] = multiply_i(value1, -1.0f);
-                        target_output2[produced] = multiply_i(value2, 1.0f);
-                        target_output3[produced] = multiply_i(value3, -1.0f);
-                    }
+                    emit_target_values(value0, value1, value2, value3, target_output0,
+                                       target_output1, target_output2, target_output3,
+                                       produced, post_phase);
                 } else {
                     for (std::size_t output = 0U; output < selected_count; ++output) {
                         const std::size_t fft_bin = output_bins[output];
-                        block.outputs[output][produced] =
-                            pfb_apply_post_phase(plan, output, post_phase, fft_re[fft_bin], fft_im[fft_bin]);
+                        pfb_store_output(block.outputs[output], produced,
+                                         pfb_apply_post_phase(plan, output, post_phase,
+                                                              fft_re[fft_bin], fft_im[fft_bin]));
                     }
                 }
             }
