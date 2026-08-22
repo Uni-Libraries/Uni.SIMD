@@ -3,11 +3,11 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
-#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <span>
@@ -18,7 +18,7 @@
 
 #include <fmt/format.h>
 
-#include <uni/simd/simd.hpp>
+#include <uni/simd/uni_simd.h>
 
 #include "cpu_topology.hpp"
 
@@ -48,15 +48,16 @@ constexpr bool kOptimizedBuild =
 #endif
 #endif
 
-constexpr std::array kCandidateBackends{
-    uni::simd::Backend::generic,
-    uni::simd::Backend::sse2,
-    uni::simd::Backend::avx2,
-    uni::simd::Backend::avx2_fma,
-    uni::simd::Backend::avx512,
-    uni::simd::Backend::automatic,
+constexpr std::array<uni_simd_backend_e, 7U> kCandidateBackends{
+    UNI_SIMD_BACKEND_GENERIC,
+    UNI_SIMD_BACKEND_X86_SSE2,
+    UNI_SIMD_BACKEND_X86_AVX2,
+    UNI_SIMD_BACKEND_X86_AVX2_FMA,
+    UNI_SIMD_BACKEND_X86_AVX512,
+    UNI_SIMD_BACKEND_AARCH64_NEON,
+    UNI_SIMD_BACKEND_AUTOMATIC,
 };
-constexpr std::size_t kBackendSlots = static_cast<std::size_t>(uni::simd::Backend::neon) + 1U;
+constexpr std::size_t kBackendSlots = UNI_SIMD_BACKEND_AARCH64_NEON + 1U;
 
 struct WorkloadProfile {
     std::string_view label;
@@ -70,17 +71,112 @@ constexpr std::array kWorkloadProfiles{
     WorkloadProfile{"256 KiB", 256U * 1024U, 16U, true},
     WorkloadProfile{"4 MiB", 4U * 1024U * 1024U, 4U, true},
     WorkloadProfile{"32 MiB", 32U * 1024U * 1024U, 2U, true},
-    WorkloadProfile{"256 MiB", 256U * 1024U * 1024U, 2U, false},
+    WorkloadProfile{"64 MiB", 64U * 1024U * 1024U, 2U, false},
 };
+
+enum class WorkloadShape : std::uint8_t {
+    bytes,
+    pack_bits,
+    unpack_bits,
+    complex_to_bytes,
+    complex_to_float,
+    dot,
+    symmetric_dot,
+    ifft,
+    pfb,
+};
+
+enum class BackendPolicy : std::uint8_t {
+    dispatched,
+    runtime_only,
+};
+
+enum Requirement : std::uint32_t {
+    requirement_none = 0U,
+    requirement_scale = 1U << 0U,
+    requirement_normalization = 1U << 1U,
+    requirement_rbw = 1U << 2U,
+    requirement_taps = 1U << 3U,
+    requirement_center_tap = 1U << 4U,
+    requirement_transform_size = 1U << 5U,
+    requirement_state = 1U << 6U,
+};
+
+struct KernelDescription {
+    std::string_view name;
+    std::string_view description;
+    uni_simd_kernel_e kernel;
+    WorkloadShape shape;
+    std::uint32_t requirements;
+    BackendPolicy backend_policy;
+    std::size_t configuration = 0U;
+    bool all_profiles = true;
+};
+
+constexpr std::array kKernelDescriptions{
+    KernelDescription{"copy_u8", "byte copy with memmove semantics", UNI_SIMD_KERNEL_COPY_U8,
+                      WorkloadShape::bytes, requirement_none, BackendPolicy::runtime_only},
+    KernelDescription{"invert_lsb_u8", "invert the least significant bit", UNI_SIMD_KERNEL_INVERT_LSB_U8,
+                      WorkloadShape::bytes, requirement_none, BackendPolicy::dispatched},
+    KernelDescription{"invert_u8", "invert all bits", UNI_SIMD_KERNEL_INVERT_U8,
+                      WorkloadShape::bytes, requirement_none, BackendPolicy::dispatched},
+    KernelDescription{"pack_bits_lsb_u8", "pack byte-valued bits, LSB first", UNI_SIMD_KERNEL_PACK_BITS_LSB_U8,
+                      WorkloadShape::pack_bits, requirement_none, BackendPolicy::dispatched},
+    KernelDescription{"pack_bits_msb_u8", "pack byte-valued bits, MSB first", UNI_SIMD_KERNEL_PACK_BITS_MSB_U8,
+                      WorkloadShape::pack_bits, requirement_none, BackendPolicy::dispatched},
+    KernelDescription{"unpack_bits_lsb_u8", "unpack bits, LSB first", UNI_SIMD_KERNEL_UNPACK_BITS_LSB_U8,
+                      WorkloadShape::unpack_bits, requirement_none, BackendPolicy::dispatched},
+    KernelDescription{"unpack_bits_msb_u8", "unpack bits, MSB first", UNI_SIMD_KERNEL_UNPACK_BITS_MSB_U8,
+                      WorkloadShape::unpack_bits, requirement_none, BackendPolicy::dispatched},
+    KernelDescription{"quantize_cf32_u8", "quantize interleaved complex floats", UNI_SIMD_KERNEL_QUANTIZE_CF32_U8,
+                      WorkloadShape::complex_to_bytes, requirement_scale, BackendPolicy::dispatched},
+    KernelDescription{"magnitude_squared_cf32_f32", "compute normalized squared magnitude",
+                      UNI_SIMD_KERNEL_MAGNITUDE_SQUARED_CF32_F32, WorkloadShape::complex_to_float,
+                      requirement_normalization, BackendPolicy::dispatched},
+    KernelDescription{"power_spectral_density_cf32_f32", "compute normalized power spectral density",
+                      UNI_SIMD_KERNEL_POWER_SPECTRAL_DENSITY_CF32_F32, WorkloadShape::complex_to_float,
+                      requirement_normalization | requirement_rbw, BackendPolicy::dispatched},
+    KernelDescription{"dot_cf32_f32", "complex/real dot product", UNI_SIMD_KERNEL_DOT_CF32_F32,
+                      WorkloadShape::dot, requirement_taps, BackendPolicy::dispatched},
+    KernelDescription{"dot_symmetric_cf32_f32", "symmetric complex/real dot product",
+                      UNI_SIMD_KERNEL_DOT_SYMMETRIC_CF32_F32, WorkloadShape::symmetric_dot,
+                      requirement_taps | requirement_center_tap, BackendPolicy::dispatched},
+    KernelDescription{"ifft_cf32_4", "four-point split-complex IFFT", UNI_SIMD_KERNEL_IFFT_SPLIT_CF32,
+                      WorkloadShape::ifft, requirement_transform_size, BackendPolicy::dispatched, 4U, false},
+    KernelDescription{"ifft_cf32_8", "eight-point split-complex IFFT", UNI_SIMD_KERNEL_IFFT_SPLIT_CF32,
+                      WorkloadShape::ifft, requirement_transform_size, BackendPolicy::dispatched, 8U, false},
+    KernelDescription{"ifft_cf32_16", "sixteen-point split-complex IFFT", UNI_SIMD_KERNEL_IFFT_SPLIT_CF32,
+                      WorkloadShape::ifft, requirement_transform_size, BackendPolicy::dispatched, 16U, false},
+    KernelDescription{"ifft_cf32_32", "thirty-two-point split-complex IFFT", UNI_SIMD_KERNEL_IFFT_SPLIT_CF32,
+                      WorkloadShape::ifft, requirement_transform_size, BackendPolicy::dispatched, 32U, false},
+    KernelDescription{"pfb_channelizer_cf32_4", "four-bin streaming PFB channelizer",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 4U},
+    KernelDescription{"pfb_channelizer_cf32_8", "eight-bin streaming PFB channelizer",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 8U},
+    KernelDescription{"pfb_channelizer_cf32_16", "sixteen-bin streaming PFB channelizer",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 16U},
+    KernelDescription{"pfb_channelizer_cf32_32", "thirty-two-bin streaming PFB channelizer",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 32U},
+};
+
 constexpr std::size_t kBufferAlignment = 128U;
-constexpr std::size_t kProfileColumnWidth = 26U;
-constexpr auto kCalibrationDuration = std::chrono::milliseconds{2};
+constexpr std::size_t kProfileColumnWidth = 29U;
+constexpr auto kCalibrationDuration = std::chrono::microseconds{250};
 volatile double checksum_sink = 0.0;
 
 struct Config {
-    std::size_t samples = 15U;
-    std::size_t warmup_batches = 3U;
-    std::size_t sample_milliseconds = 10U;
+    std::size_t iterations = 3U;
+    std::size_t warmup = 1U;
+    std::size_t sample_milliseconds = 1U;
+    std::string_view preset = "quick";
 };
 
 struct Statistics {
@@ -128,11 +224,6 @@ using AlignedBuffer = std::vector<Value, AlignedAllocator<Value>>;
 template <typename Value>
 using BufferLanes = std::vector<AlignedBuffer<Value>>;
 
-template <typename Value>
-struct alignas(kBufferAlignment) AlignedValue {
-    Value value{};
-};
-
 enum class ParseResult {
     run,
     help,
@@ -159,6 +250,22 @@ private:
 };
 #endif
 
+class SimdRuntime final {
+public:
+    SimdRuntime() {
+        if (uni_simd_initialize() != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error("failed to initialize Uni.SIMD");
+        }
+    }
+
+    ~SimdRuntime() {
+        (void)uni_simd_finalize();
+    }
+
+    SimdRuntime(const SimdRuntime&) = delete;
+    SimdRuntime& operator=(const SimdRuntime&) = delete;
+};
+
 [[nodiscard]] std::optional<std::size_t> parse_size(const std::string_view text) {
     std::uint64_t value = 0U;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
@@ -170,7 +277,7 @@ private:
 }
 
 void print_usage(const std::string_view program) {
-    fmt::print("Usage: {} [--samples N] [--warmup N] [--sample-ms N]\n", program);
+    fmt::print("Usage: {} [--thorough] [--iterations N] [--warmup N] [--sample-ms N]\n", program);
 }
 
 [[nodiscard]] ParseResult parse_arguments(const int argc, char** argv, Config& config) {
@@ -179,7 +286,14 @@ void print_usage(const std::string_view program) {
         if (argument == "--help" || argument == "-h") {
             return ParseResult::help;
         }
-        if (argument != "--samples" && argument != "--iterations" && argument != "--warmup" &&
+        if (argument == "--thorough") {
+            config.iterations = 100U;
+            config.warmup = 10U;
+            config.sample_milliseconds = 10U;
+            config.preset = "thorough";
+            continue;
+        }
+        if (argument != "--iterations" && argument != "--samples" && argument != "--warmup" &&
             argument != "--sample-ms") {
             std::cerr << "Unknown argument: " << argument << '\n';
             return ParseResult::error;
@@ -188,26 +302,41 @@ void print_usage(const std::string_view program) {
             std::cerr << "Missing value for " << argument << '\n';
             return ParseResult::error;
         }
-
         const auto value = parse_size(argv[index]);
-        if (!value.has_value()) {
+        if (!value) {
             std::cerr << "Invalid positive integer for " << argument << ": " << argv[index] << '\n';
             return ParseResult::error;
         }
-        if (argument == "--samples" || argument == "--iterations") {
-            config.samples = *value;
+        if (argument == "--iterations" || argument == "--samples") {
+            config.iterations = *value;
         } else if (argument == "--warmup") {
-            config.warmup_batches = *value;
+            config.warmup = *value;
         } else {
             config.sample_milliseconds = *value;
         }
+        config.preset = "custom";
     }
     return ParseResult::run;
 }
 
-void require_success(const uni::simd::Result result) {
-    if (!uni::simd::succeeded(result)) {
-        throw std::runtime_error("SIMD operation failed");
+[[nodiscard]] std::string_view backend_name(const uni_simd_backend_e backend) noexcept {
+    switch (backend) {
+    case UNI_SIMD_BACKEND_AUTOMATIC:
+        return "automatic";
+    case UNI_SIMD_BACKEND_GENERIC:
+        return "generic";
+    case UNI_SIMD_BACKEND_X86_SSE2:
+        return "sse2";
+    case UNI_SIMD_BACKEND_X86_AVX2:
+        return "avx2";
+    case UNI_SIMD_BACKEND_X86_AVX2_FMA:
+        return "avx2-fma";
+    case UNI_SIMD_BACKEND_X86_AVX512:
+        return "avx512";
+    case UNI_SIMD_BACKEND_AARCH64_NEON:
+        return "neon";
+    default:
+        return "unknown";
     }
 }
 
@@ -217,15 +346,13 @@ void require_success(const uni::simd::Result result) {
     }
     std::sort(values.begin(), values.end());
     const std::size_t middle = values.size() / 2U;
-    if (values.size() % 2U != 0U) {
-        return values[middle];
-    }
-    return (values[middle - 1U] + values[middle]) * 0.5;
+    return values.size() % 2U != 0U ? values[middle] : (values[middle - 1U] + values[middle]) * 0.5;
 }
 
 template <typename Operation, typename Checksum>
-[[nodiscard]] Statistics measure(const Config& config, const WorkloadProfile& profile, const std::size_t item_count,
-                                 const double bytes_per_iteration, Operation&& operation, Checksum&& checksum) {
+[[nodiscard]] Statistics measure(const Config& config, const WorkloadProfile& profile,
+                                 const std::size_t item_count, const double bytes_per_iteration,
+                                 Operation&& operation, Checksum&& checksum) {
     std::size_t next_lane = 0U;
     const auto take_lane = [&] {
         const std::size_t lane = next_lane;
@@ -237,7 +364,9 @@ template <typename Operation, typename Checksum>
             const std::size_t active_lane = profile.prewarm_samples
                                                 ? lane
                                                 : (lane + repetition) % profile.address_lanes;
-            require_success(operation(active_lane));
+            if (operation(active_lane) != UNI_SIMD_RESULT_SUCCESS) {
+                throw std::runtime_error("SIMD operation failed while measuring");
+            }
         }
     };
 
@@ -245,8 +374,8 @@ template <typename Operation, typename Checksum>
     double calibration_seconds = 0.0;
     for (;;) {
         const std::size_t lane = take_lane();
-        if (profile.prewarm_samples) {
-            require_success(operation(lane));
+        if (profile.prewarm_samples && operation(lane) != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error("SIMD operation failed while calibrating");
         }
         const auto begin = Clock::now();
         run_batch(lane, calibration_repetitions);
@@ -268,17 +397,17 @@ template <typename Operation, typename Checksum>
     }
     const std::size_t batch_repetitions = std::max<std::size_t>(1U, static_cast<std::size_t>(scaled_repetitions));
 
-    for (std::size_t iteration = 0U; iteration < config.warmup_batches; ++iteration) {
+    for (std::size_t iteration = 0U; iteration < config.warmup; ++iteration) {
         run_batch(take_lane(), batch_repetitions);
     }
 
     std::vector<double> nanoseconds_per_item;
-    nanoseconds_per_item.reserve(config.samples);
+    nanoseconds_per_item.reserve(config.iterations);
     std::size_t last_lane = 0U;
-    for (std::size_t sample = 0U; sample < config.samples; ++sample) {
+    for (std::size_t iteration = 0U; iteration < config.iterations; ++iteration) {
         last_lane = take_lane();
-        if (profile.prewarm_samples) {
-            require_success(operation(last_lane));
+        if (profile.prewarm_samples && operation(last_lane) != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error("SIMD operation failed while prewarming");
         }
         const auto begin = Clock::now();
         run_batch(last_lane, batch_repetitions);
@@ -286,8 +415,74 @@ template <typename Operation, typename Checksum>
         if (seconds <= 0.0) {
             throw std::runtime_error("benchmark timer resolution is insufficient");
         }
-        const double processed_items = static_cast<double>(item_count) * static_cast<double>(batch_repetitions);
-        nanoseconds_per_item.push_back(seconds * 1.0e9 / processed_items);
+        nanoseconds_per_item.push_back(
+            seconds * 1.0e9 / (static_cast<double>(item_count) * static_cast<double>(batch_repetitions)));
+    }
+
+    checksum_sink = checksum(last_lane);
+    const double median_nanoseconds = median(nanoseconds_per_item);
+    std::vector<double> absolute_deviations;
+    absolute_deviations.reserve(nanoseconds_per_item.size());
+    for (const double sample : nanoseconds_per_item) {
+        absolute_deviations.push_back(std::abs(sample - median_nanoseconds));
+    }
+    const double relative_mad_percent =
+        median_nanoseconds == 0.0 ? 0.0 : 148.26 * median(std::move(absolute_deviations)) / median_nanoseconds;
+    const double bytes_per_item = bytes_per_iteration / static_cast<double>(item_count);
+    return {
+        .nanoseconds_per_item = median_nanoseconds,
+        .gibibytes_per_second = bytes_per_item * 1.0e9 / median_nanoseconds / static_cast<double>(1ULL << 30U),
+        .relative_mad_percent = relative_mad_percent,
+    };
+}
+
+template <typename Prepare, typename Operation, typename Checksum>
+[[nodiscard]] Statistics measure_prepared(const Config& config, const WorkloadProfile& profile,
+                                          const std::size_t item_count, const double bytes_per_iteration,
+                                          Prepare&& prepare, Operation&& operation, Checksum&& checksum) {
+    std::size_t next_lane = 0U;
+    const auto take_lane = [&] {
+        const std::size_t lane = next_lane;
+        next_lane = (next_lane + 1U) % profile.address_lanes;
+        return lane;
+    };
+    const auto run_once = [&](const std::size_t lane) {
+        prepare(lane);
+        const auto begin = Clock::now();
+        if (operation(lane) != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error("SIMD operation failed while measuring prepared input");
+        }
+        return std::chrono::duration<double>(Clock::now() - begin).count();
+    };
+
+    const double calibration_seconds = run_once(take_lane());
+    if (calibration_seconds <= 0.0) {
+        throw std::runtime_error("benchmark timer resolution is insufficient");
+    }
+    const double target_seconds = static_cast<double>(config.sample_milliseconds) / 1000.0;
+    const double scaled_repetitions = std::ceil(target_seconds / calibration_seconds);
+    if (scaled_repetitions > static_cast<double>(std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error("benchmark repetition count overflow");
+    }
+    const std::size_t repetitions = std::max<std::size_t>(1U, static_cast<std::size_t>(scaled_repetitions));
+
+    for (std::size_t iteration = 0U; iteration < config.warmup; ++iteration) {
+        for (std::size_t repetition = 0U; repetition < repetitions; ++repetition) {
+            (void)run_once(take_lane());
+        }
+    }
+
+    std::vector<double> nanoseconds_per_item;
+    nanoseconds_per_item.reserve(config.iterations);
+    std::size_t last_lane = 0U;
+    for (std::size_t iteration = 0U; iteration < config.iterations; ++iteration) {
+        double seconds = 0.0;
+        for (std::size_t repetition = 0U; repetition < repetitions; ++repetition) {
+            last_lane = take_lane();
+            seconds += run_once(last_lane);
+        }
+        nanoseconds_per_item.push_back(
+            seconds * 1.0e9 / (static_cast<double>(item_count) * static_cast<double>(repetitions)));
     }
 
     checksum_sink = checksum(last_lane);
@@ -308,51 +503,468 @@ template <typename Operation, typename Checksum>
 }
 
 template <typename Value>
-[[nodiscard]] double checksum(const AlignedBuffer<Value>& values) {
-    double sum = 0.0;
-    for (const Value value : values) {
-        sum += static_cast<double>(value);
-    }
-    return sum;
-}
-
-[[nodiscard]] double checksum(const std::complex<float> value) {
-    return static_cast<double>(value.real()) + static_cast<double>(value.imag());
-}
-
-template <typename Value>
-void verify_exact(const AlignedBuffer<Value>& expected, const AlignedBuffer<Value>& actual) {
-    if (expected != actual) {
-        throw std::runtime_error("backend result differs from the generic reference");
-    }
-}
-
-void verify_floats(const std::span<const float> expected, const std::span<const float> actual,
-                   const float relative_tolerance = 1.0e-5f) {
-    if (expected.size() != actual.size()) {
-        throw std::runtime_error("backend result has an unexpected size");
-    }
-    for (std::size_t index = 0; index < expected.size(); ++index) {
-        const float tolerance = relative_tolerance * std::max(1.0f, std::abs(expected[index]));
-        if (!std::isfinite(expected[index]) || !std::isfinite(actual[index]) ||
-            std::abs(expected[index] - actual[index]) > tolerance) {
-            throw std::runtime_error("backend result differs from the generic reference");
+[[nodiscard]] BufferLanes<Value> make_lanes(const std::size_t lane_count, const std::size_t item_count) {
+    BufferLanes<Value> lanes;
+    lanes.reserve(lane_count);
+    for (std::size_t lane = 0U; lane < lane_count; ++lane) {
+        lanes.emplace_back(item_count);
+        if (reinterpret_cast<std::uintptr_t>(lanes.back().data()) % kBufferAlignment != 0U) {
+            throw std::runtime_error("benchmark buffer alignment is insufficient");
         }
     }
+    return lanes;
 }
 
-void verify_complex(const std::complex<float> expected, const std::complex<float> actual,
-                    const std::size_t accumulated_items) {
-    const float relative_tolerance = 1.0e-4f + 8.0f * std::numeric_limits<float>::epsilon() *
-                                                       std::sqrt(static_cast<float>(accumulated_items));
-    const float tolerance = relative_tolerance * std::max(1.0f, std::abs(expected));
-    if (!std::isfinite(actual.real()) || !std::isfinite(actual.imag()) ||
-        std::abs(expected - actual) > tolerance) {
-        std::cerr << "complex result mismatch: expected (" << expected.real() << ", " << expected.imag()
-                  << "), actual (" << actual.real() << ", " << actual.imag() << ")\n";
-        throw std::runtime_error("backend result differs from the generic reference");
-    }
+[[nodiscard]] uni_simd_param_t u32_parameter(const uni_simd_param_id_e id, const std::uint32_t value) noexcept {
+    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_U32};
+    parameter.value.u32 = value;
+    return parameter;
 }
+
+[[nodiscard]] uni_simd_param_t size_parameter(const uni_simd_param_id_e id, const std::size_t value) noexcept {
+    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_SIZE};
+    parameter.value.size = value;
+    return parameter;
+}
+
+[[nodiscard]] uni_simd_param_t float_parameter(const uni_simd_param_id_e id, const float value) noexcept {
+    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_FLOAT32};
+    parameter.value.f32 = value;
+    return parameter;
+}
+
+[[nodiscard]] uni_simd_param_t pointer_parameter(const uni_simd_param_id_e id, const void* const value) noexcept {
+    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_CONST_POINTER};
+    parameter.value.const_pointer = value;
+    return parameter;
+}
+
+[[nodiscard]] bool has_requirement(const KernelDescription& description, const Requirement requirement) noexcept {
+    return (description.requirements & static_cast<std::uint32_t>(requirement)) != 0U;
+}
+
+struct Invocation {
+    uni_simd_const_buffer_t input{};
+    uni_simd_buffer_t output{};
+    std::array<uni_simd_param_t, 8U> parameters{};
+    std::size_t parameter_count = 0U;
+};
+
+struct StateDeleter {
+    void operator()(uni_simd_state_t* const state) const noexcept {
+        uni_simd_state_free(state);
+    }
+};
+
+using StatePtr = std::unique_ptr<uni_simd_state_t, StateDeleter>;
+
+class Workload final {
+public:
+    Workload(const KernelDescription& description, const WorkloadProfile& profile)
+        : description_(description), profile_(profile) {
+        prepare_shape();
+        prepare_invocations();
+        require_success(configure(UNI_SIMD_BACKEND_GENERIC), "generic configuration");
+        require_success(execute(0U), "generic reference");
+        capture_reference();
+    }
+
+    ~Workload() {
+        free_states();
+    }
+
+    [[nodiscard]] uni_simd_result_e configure(const uni_simd_backend_e backend) {
+        free_states();
+        if (description_.shape == WorkloadShape::ifft) {
+            fill_ifft_inputs();
+        }
+        for (std::size_t lane = 0U; lane < invocations_.size(); ++lane) {
+            auto& invocation = invocations_[lane];
+            std::size_t count = 0U;
+            if (description_.shape == WorkloadShape::pfb) {
+                invocation.parameters[count++] =
+                    u32_parameter(UNI_SIMD_PARAM_RESOLVED_BACKEND, UNI_SIMD_BACKEND_AUTOMATIC);
+                invocation.parameters[count++] = size_parameter(UNI_SIMD_PARAM_OUTPUT_COUNT, 0U);
+                invocation.parameter_count = count;
+                continue;
+            }
+            invocation.parameters[count++] = u32_parameter(UNI_SIMD_PARAM_BACKEND, backend);
+            invocation.parameters[count++] = u32_parameter(UNI_SIMD_PARAM_RESOLVED_BACKEND, UNI_SIMD_BACKEND_AUTOMATIC);
+            if (has_requirement(description_, requirement_scale)) {
+                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_SCALE, -7.0f);
+            }
+            if (has_requirement(description_, requirement_normalization)) {
+                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_NORMALIZATION_FACTOR, 3.0f);
+            }
+            if (has_requirement(description_, requirement_rbw)) {
+                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_RBW_HZ, 2.0f);
+            }
+            if (has_requirement(description_, requirement_taps) && description_.shape != WorkloadShape::pfb) {
+                invocation.parameters[count++] = pointer_parameter(UNI_SIMD_PARAM_TAPS, taps_[lane].data());
+                invocation.parameters[count++] = size_parameter(UNI_SIMD_PARAM_TAP_COUNT, taps_[lane].size());
+            }
+            if (has_requirement(description_, requirement_center_tap)) {
+                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_CENTER_TAP, 0.25f);
+            }
+            invocation.parameter_count = count;
+        }
+        if (description_.shape != WorkloadShape::pfb) {
+            return UNI_SIMD_RESULT_SUCCESS;
+        }
+        for (std::size_t lane = 0U; lane < invocations_.size(); ++lane) {
+            std::array<uni_simd_param_t, 9U> creation{
+                u32_parameter(UNI_SIMD_PARAM_BACKEND, backend),
+                u32_parameter(UNI_SIMD_PARAM_RESOLVED_BACKEND, UNI_SIMD_BACKEND_AUTOMATIC),
+                size_parameter(UNI_SIMD_PARAM_BIN_COUNT, description_.configuration),
+                size_parameter(UNI_SIMD_PARAM_DECIMATION, description_.configuration / 2U),
+                u32_parameter(UNI_SIMD_PARAM_GRID_OFFSET, description_.configuration == 8U
+                                                               ? UNI_SIMD_PFB_HALF_BINS
+                                                               : UNI_SIMD_PFB_INTEGER_BINS),
+                pointer_parameter(UNI_SIMD_PARAM_TAPS, taps_[lane].data()),
+                size_parameter(UNI_SIMD_PARAM_TAP_COUNT, taps_[lane].size()),
+                pointer_parameter(UNI_SIMD_PARAM_LOGICAL_BINS, description_.configuration == 8U
+                                                                       ? pfb_logical_bins_.data()
+                                                                       : &pfb_zero_bin_),
+                size_parameter(UNI_SIMD_PARAM_LOGICAL_BIN_COUNT, pfb_output_count()),
+            };
+            uni_simd_state_t* state = nullptr;
+            const uni_simd_result_e result = uni_simd_execute(
+                description_.kernel, nullptr, nullptr, creation.data(), creation.size(), &state);
+            if (result != UNI_SIMD_RESULT_SUCCESS) {
+                uni_simd_state_free(state);
+                free_states();
+                return result;
+            }
+            states_[lane].reset(state);
+            invocations_[lane].parameters[0].value.u32 = creation[1].value.u32;
+        }
+        return UNI_SIMD_RESULT_SUCCESS;
+    }
+
+    [[nodiscard]] uni_simd_result_e execute(const std::size_t lane) {
+        auto& invocation = invocations_.at(lane);
+        if (description_.shape == WorkloadShape::ifft) {
+            for (std::size_t offset = 0U; offset < item_count_; offset += description_.configuration) {
+                uni_simd_split_cf32_t values{
+                    .real = ifft_real_[lane].data() + offset,
+                    .imag = ifft_imag_[lane].data() + offset,
+                    .count = description_.configuration,
+                };
+                const uni_simd_result_e result = uni_simd_execute(
+                    description_.kernel, nullptr, &values,
+                    invocation.parameters.data(), invocation.parameter_count, nullptr);
+                if (result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
+                }
+            }
+            return UNI_SIMD_RESULT_SUCCESS;
+        }
+        if (description_.shape == WorkloadShape::pfb) {
+            uni_simd_state_t* state = states_[lane].get();
+            return uni_simd_execute(description_.kernel, &invocation.input, &pfb_output_arrays_[lane],
+                                    invocation.parameters.data(), invocation.parameter_count, &state);
+        }
+        return uni_simd_execute(description_.kernel, &invocation.input, &invocation.output,
+                                invocation.parameters.data(), invocation.parameter_count, nullptr);
+    }
+
+    [[nodiscard]] uni_simd_backend_e resolved_backend() const noexcept {
+        const std::size_t parameter_index = description_.shape == WorkloadShape::pfb ? 0U : 1U;
+        return invocations_.front().parameters[parameter_index].value.u32;
+    }
+
+    void prepare_measurement(const std::size_t lane) {
+        if (description_.shape == WorkloadShape::ifft) {
+            fill_ifft_input(lane);
+        }
+    }
+
+    [[nodiscard]] bool needs_prepared_measurement() const noexcept {
+        return description_.shape == WorkloadShape::ifft;
+    }
+
+    void validate(const std::size_t lane) const {
+        if (!u8_reference_.empty()) {
+            if (u8_outputs_.at(lane) != u8_reference_) {
+                throw std::runtime_error(error_message("result differs from generic reference"));
+            }
+            return;
+        }
+        std::span<const float> actual;
+        AlignedBuffer<float> ifft_actual;
+        if (description_.shape == WorkloadShape::ifft) {
+            ifft_actual.reserve(item_count_ * 2U);
+            ifft_actual.insert(ifft_actual.end(), ifft_real_[lane].begin(), ifft_real_[lane].end());
+            ifft_actual.insert(ifft_actual.end(), ifft_imag_[lane].begin(), ifft_imag_[lane].end());
+            actual = ifft_actual;
+        } else {
+            actual = f32_outputs_.at(lane);
+        }
+        if (actual.size() != f32_reference_.size()) {
+            throw std::runtime_error(error_message("result size differs from generic reference"));
+        }
+        const float accumulated_tolerance =
+            description_.shape == WorkloadShape::dot || description_.shape == WorkloadShape::symmetric_dot ||
+                    description_.shape == WorkloadShape::pfb
+                ? 1.0e-4f + 8.0f * std::numeric_limits<float>::epsilon() *
+                                 std::sqrt(static_cast<float>(description_.shape == WorkloadShape::pfb
+                                                                  ? taps_.front().size()
+                                                                  : item_count_))
+                : 1.0e-5f;
+        for (std::size_t index = 0U; index < actual.size(); ++index) {
+            const float tolerance = accumulated_tolerance * std::max(1.0f, std::abs(f32_reference_[index]));
+            if (!std::isfinite(actual[index]) || !std::isfinite(f32_reference_[index]) ||
+                std::abs(actual[index] - f32_reference_[index]) > tolerance) {
+                throw std::runtime_error(error_message("result differs from generic reference"));
+            }
+        }
+    }
+
+    [[nodiscard]] double checksum(const std::size_t lane) const noexcept {
+        double result = 0.0;
+        if (!u8_outputs_.empty()) {
+            for (const std::uint8_t value : u8_outputs_[lane]) {
+                result += value;
+            }
+        } else if (description_.shape == WorkloadShape::ifft) {
+            for (const float value : ifft_real_[lane]) {
+                result += value;
+            }
+            for (const float value : ifft_imag_[lane]) {
+                result += value;
+            }
+        } else {
+            for (const float value : f32_outputs_[lane]) {
+                result += value;
+            }
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::size_t item_count() const noexcept { return item_count_; }
+    [[nodiscard]] double bytes_per_iteration() const noexcept { return bytes_per_iteration_; }
+
+private:
+    void prepare_shape() {
+        const std::size_t lanes = profile_.address_lanes;
+        switch (description_.shape) {
+        case WorkloadShape::bytes:
+            item_count_ = std::max<std::size_t>(64U, profile_.working_set_bytes / 2U);
+            u8_inputs_ = make_lanes<std::uint8_t>(lanes, item_count_);
+            u8_outputs_ = make_lanes<std::uint8_t>(lanes, item_count_);
+            break;
+        case WorkloadShape::pack_bits: {
+            const std::size_t requested = std::max<std::size_t>(64U, profile_.working_set_bytes * 8U / 9U);
+            item_count_ = requested - requested % 8U;
+            u8_inputs_ = make_lanes<std::uint8_t>(lanes, item_count_);
+            u8_outputs_ = make_lanes<std::uint8_t>(lanes, item_count_ / 8U);
+            break;
+        }
+        case WorkloadShape::unpack_bits: {
+            const std::size_t requested = std::max<std::size_t>(64U, profile_.working_set_bytes * 8U / 9U);
+            item_count_ = requested - requested % 8U;
+            u8_inputs_ = make_lanes<std::uint8_t>(lanes, item_count_ / 8U);
+            u8_outputs_ = make_lanes<std::uint8_t>(lanes, item_count_);
+            break;
+        }
+        case WorkloadShape::complex_to_bytes:
+            item_count_ = std::max<std::size_t>(8U, profile_.working_set_bytes / 10U);
+            f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
+            u8_outputs_ = make_lanes<std::uint8_t>(lanes, item_count_ * 2U);
+            break;
+        case WorkloadShape::complex_to_float:
+            item_count_ = std::max<std::size_t>(8U, profile_.working_set_bytes / 12U);
+            f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
+            f32_outputs_ = make_lanes<float>(lanes, item_count_);
+            break;
+        case WorkloadShape::dot:
+            item_count_ = std::max<std::size_t>(8U, profile_.working_set_bytes / 12U);
+            f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
+            f32_outputs_ = make_lanes<float>(lanes, 2U);
+            taps_ = make_lanes<float>(lanes, item_count_);
+            break;
+        case WorkloadShape::symmetric_dot:
+            item_count_ = std::max<std::size_t>(9U, profile_.working_set_bytes / 10U);
+            if (item_count_ % 2U == 0U) {
+                --item_count_;
+            }
+            f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
+            f32_outputs_ = make_lanes<float>(lanes, 2U);
+            taps_ = make_lanes<float>(lanes, (item_count_ - 1U) / 2U);
+            break;
+        case WorkloadShape::ifft:
+            item_count_ = std::max<std::size_t>(
+                description_.configuration,
+                profile_.working_set_bytes / (2U * sizeof(float)));
+            item_count_ -= item_count_ % description_.configuration;
+            ifft_real_ = make_lanes<float>(lanes, item_count_);
+            ifft_imag_ = make_lanes<float>(lanes, item_count_);
+            break;
+        case WorkloadShape::pfb: {
+            const std::size_t decimation = description_.configuration / 2U;
+            const std::size_t output_count = pfb_output_count();
+            item_count_ = std::max<std::size_t>(
+                decimation * 8U,
+                profile_.working_set_bytes * decimation /
+                    (4U * sizeof(float) * (decimation + output_count)));
+            item_count_ -= item_count_ % decimation;
+            f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
+            f32_outputs_ = make_lanes<float>(lanes, item_count_ / decimation * 2U * output_count);
+            taps_ = make_lanes<float>(lanes, description_.configuration == 8U
+                                                 ? 169U
+                                                 : description_.configuration * 8U);
+            states_.resize(lanes);
+            pfb_output_buffers_.resize(lanes);
+            for (auto& buffers : pfb_output_buffers_) {
+                buffers.resize(output_count);
+            }
+            pfb_output_arrays_.resize(lanes);
+            break;
+        }
+        }
+
+        for (auto& input : u8_inputs_) {
+            for (std::size_t index = 0U; index < input.size(); ++index) {
+                input[index] = description_.shape == WorkloadShape::pack_bits
+                                   ? static_cast<std::uint8_t>((index * 5U + 1U) & 1U)
+                                   : static_cast<std::uint8_t>((index * 37U + 11U) & 0xffU);
+            }
+        }
+        for (auto& input : f32_inputs_) {
+            for (std::size_t sample = 0U; sample < input.size() / 2U; ++sample) {
+                input[2U * sample] = static_cast<float>(sample % 127U) / 63.5f - 1.0f;
+                input[2U * sample + 1U] = static_cast<float>(sample % 61U) / 30.5f - 1.0f;
+            }
+        }
+        for (auto& lane_taps : taps_) {
+            for (std::size_t index = 0U; index < lane_taps.size(); ++index) {
+                lane_taps[index] = static_cast<float>(static_cast<int>(index % 31U) - 15) / 31.0f;
+            }
+        }
+
+        if (description_.shape == WorkloadShape::ifft) {
+            fill_ifft_inputs();
+            bytes_per_iteration_ = static_cast<double>(item_count_ * 4U * sizeof(float));
+            return;
+        }
+
+        const double input_bytes = !u8_inputs_.empty()
+                                       ? static_cast<double>(u8_inputs_.front().size())
+                                       : static_cast<double>(f32_inputs_.front().size() * sizeof(float));
+        const double output_bytes = !u8_outputs_.empty()
+                                        ? static_cast<double>(u8_outputs_.front().size())
+                                        : static_cast<double>(f32_outputs_.front().size() * sizeof(float));
+        const bool taps_are_streamed = description_.shape == WorkloadShape::dot ||
+                                       description_.shape == WorkloadShape::symmetric_dot;
+        const double tap_bytes = !taps_are_streamed || taps_.empty()
+                                     ? 0.0
+                                     : static_cast<double>(taps_.front().size() * sizeof(float));
+        bytes_per_iteration_ = input_bytes + output_bytes + tap_bytes;
+    }
+
+    void prepare_invocations() {
+        invocations_.resize(profile_.address_lanes);
+        for (std::size_t lane = 0U; lane < invocations_.size(); ++lane) {
+            auto& invocation = invocations_[lane];
+            if (description_.shape == WorkloadShape::ifft) {
+                continue;
+            }
+            if (!u8_inputs_.empty()) {
+                invocation.input = {u8_inputs_[lane].data(), u8_inputs_[lane].size()};
+            } else {
+                invocation.input = {f32_inputs_[lane].data(), item_count_};
+            }
+            if (!u8_outputs_.empty()) {
+                invocation.output = {u8_outputs_[lane].data(), u8_outputs_[lane].size()};
+            } else {
+                const std::size_t output_count =
+                    description_.shape == WorkloadShape::dot || description_.shape == WorkloadShape::symmetric_dot
+                        ? 1U
+                        : f32_outputs_[lane].size();
+                invocation.output = {f32_outputs_[lane].data(), output_count};
+            }
+            if (description_.shape == WorkloadShape::pfb) {
+                const std::size_t samples_per_output =
+                    item_count_ / (description_.configuration / 2U);
+                for (std::size_t output_index = 0U; output_index < pfb_output_count(); ++output_index) {
+                    pfb_output_buffers_[lane][output_index] = {
+                        .data = f32_outputs_[lane].data() + output_index * samples_per_output * 2U,
+                        .count = samples_per_output,
+                    };
+                }
+                pfb_output_arrays_[lane] = {
+                    .buffers = pfb_output_buffers_[lane].data(),
+                    .count = pfb_output_buffers_[lane].size(),
+                };
+            }
+        }
+    }
+
+    void capture_reference() {
+        if (!u8_outputs_.empty()) {
+            u8_reference_ = u8_outputs_.front();
+        } else if (description_.shape == WorkloadShape::ifft) {
+            f32_reference_.reserve(item_count_ * 2U);
+            f32_reference_.insert(f32_reference_.end(), ifft_real_.front().begin(), ifft_real_.front().end());
+            f32_reference_.insert(f32_reference_.end(), ifft_imag_.front().begin(), ifft_imag_.front().end());
+        } else {
+            f32_reference_ = f32_outputs_.front();
+        }
+    }
+
+    void fill_ifft_inputs() {
+        for (std::size_t lane = 0U; lane < ifft_real_.size(); ++lane) {
+            fill_ifft_input(lane);
+        }
+    }
+
+    void fill_ifft_input(const std::size_t lane) {
+        for (std::size_t index = 0U; index < item_count_; ++index) {
+            ifft_real_[lane][index] = static_cast<float>((index * 7U + 3U) % 17U) / 17.0f - 0.5f;
+            ifft_imag_[lane][index] = static_cast<float>((index * 5U + 1U) % 13U) / 13.0f - 0.5f;
+        }
+    }
+
+    void free_states() noexcept {
+        for (auto& state : states_) {
+            state.reset();
+        }
+    }
+
+    [[nodiscard]] std::size_t pfb_output_count() const noexcept {
+        return description_.configuration == 8U ? pfb_logical_bins_.size() : 1U;
+    }
+
+    void require_success(const uni_simd_result_e result, const std::string_view phase) const {
+        if (result != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error(error_message(fmt::format("{} failed with result {}", phase, result)));
+        }
+    }
+
+    [[nodiscard]] std::string error_message(const std::string_view message) const {
+        return fmt::format("{} ({}): {}", description_.name, description_.description, message);
+    }
+
+    const KernelDescription& description_;
+    const WorkloadProfile& profile_;
+    std::size_t item_count_ = 0U;
+    double bytes_per_iteration_ = 0.0;
+    BufferLanes<std::uint8_t> u8_inputs_;
+    BufferLanes<std::uint8_t> u8_outputs_;
+    BufferLanes<float> f32_inputs_;
+    BufferLanes<float> f32_outputs_;
+    BufferLanes<float> taps_;
+    BufferLanes<float> ifft_real_;
+    BufferLanes<float> ifft_imag_;
+    AlignedBuffer<std::uint8_t> u8_reference_;
+    AlignedBuffer<float> f32_reference_;
+    std::vector<Invocation> invocations_;
+    std::vector<StatePtr> states_;
+    std::vector<std::vector<uni_simd_buffer_t>> pfb_output_buffers_;
+    std::vector<uni_simd_buffer_array_t> pfb_output_arrays_;
+    std::array<std::int32_t, 4U> pfb_logical_bins_{-2, -1, 0, 1};
+    std::int32_t pfb_zero_bin_ = 0;
+};
 
 [[nodiscard]] std::string table_border(const std::span<const std::size_t> widths, const char fill = '-') {
     std::string border{"+"};
@@ -385,7 +997,6 @@ void verify_complex(const std::complex<float> expected, const std::complex<float
         const std::string_view architecture = key.substr(4U);
         return std::string(architecture.substr(0U, architecture.find('_')));
     }
-
     std::string_view label = core_class.label;
     if (const std::size_t separator = label.find('@'); separator != std::string_view::npos) {
         label = label.substr(0U, separator);
@@ -422,7 +1033,7 @@ public:
                const std::size_t class_index, const std::size_t class_count) const {
         constexpr auto widths = [] {
             std::array<std::size_t, kWorkloadProfiles.size() + 2U> result{};
-            result[0] = 30U;
+            result[0] = 34U;
             result[1] = 8U;
             std::fill(result.begin() + 2, result.end(), kProfileColumnWidth);
             return result;
@@ -435,13 +1046,13 @@ public:
         const std::string title = fmt::format("RESULTS {}/{}: {} ({})", class_index + 1U, class_count,
                                               core_type_name(core_class), placement);
         fmt::print("\n{}\n| {:^{}} |\n{}\n", frame, title, frame.size() - 4U, border);
-        fmt::print("| {:<30} | {:<8} |", "kernel", "backend");
+        fmt::print("| {:<34} | {:<8} |", "kernel", "backend");
         for (const auto& profile : kWorkloadProfiles) {
             fmt::print(" {:^{}} |", profile.label, kProfileColumnWidth);
         }
-        fmt::print("\n| {:<30} | {:<8} |", "", "");
+        fmt::print("\n| {:<34} | {:<8} |", "", "");
         const std::string metric_header =
-            fmt::format("{:>6} {:>5} {:>5} {:>7}", "ns/i", "GiB/s", "MAD%", "speedup");
+            fmt::format("{:>6} {:>5} {:>5} {:>10}", "ns/i", "GiB/s", "MAD%", "vs generic");
         for (std::size_t index = 0U; index < kWorkloadProfiles.size(); ++index) {
             fmt::print(" {:>{}} |", metric_header, kProfileColumnWidth);
         }
@@ -453,7 +1064,7 @@ public:
                 fmt::print("{}\n", border);
             }
             previous_name = row.name;
-            fmt::print("| {:<30} | {:<8} |", row.name, row.backend);
+            fmt::print("| {:<34} | {:<8} |", row.name, row.backend);
             for (const auto& profile : row.profiles) {
                 fmt::print(" {:>{}} |", format_profile(profile), kProfileColumnWidth);
             }
@@ -464,326 +1075,101 @@ public:
 
 private:
     [[nodiscard]] static std::string format_profile(const std::optional<ProfileMeasurement>& measurement) {
-        if (!measurement.has_value()) {
+        if (!measurement) {
             return "-";
         }
-        const std::string speedup =
-            measurement->speedup.has_value() ? fmt::format("{:.2f}x", *measurement->speedup) : "-";
+        const std::string speedup = measurement->speedup ? fmt::format("{:.2f}x", *measurement->speedup) : "-";
         const std::string mad = fmt::format("{:.1f}%", measurement->statistics.relative_mad_percent);
-        return fmt::format("{:>6.3f} {:>5.1f} {:>5} {:>7}", measurement->statistics.nanoseconds_per_item,
+        return fmt::format("{:>6.3f} {:>5.1f} {:>5} {:>10}", measurement->statistics.nanoseconds_per_item,
                            measurement->statistics.gibibytes_per_second, mad, speedup);
     }
 
     std::vector<ResultRow> rows_;
 };
 
-class BenchmarkRunner final {
-public:
-    BenchmarkRunner(const Config& config, const WorkloadProfile& profile, const std::size_t profile_index,
-                    BenchmarkResults& results)
-        : config_(config), profile_(profile), profile_index_(profile_index), results_(results) {
+[[nodiscard]] Statistics measure_workload(const Config& config, const WorkloadProfile& profile,
+                                          Workload& workload) {
+    if (workload.needs_prepared_measurement()) {
+        return measure_prepared(
+            config, profile, workload.item_count(), workload.bytes_per_iteration(),
+            [&](const std::size_t lane) { workload.prepare_measurement(lane); },
+            [&](const std::size_t lane) { return workload.execute(lane); },
+            [&](const std::size_t lane) { return workload.checksum(lane); });
     }
-
-    template <typename Operation, typename Validator, typename Checksum>
-    void run(const std::string_view name, const uni::simd::Kernel kernel, const std::size_t item_count,
-             const double bytes_per_iteration, Operation&& operation, Validator&& validator,
-             Checksum&& checksum_function) const {
-        std::array<bool, kBackendSlots> measured_backends{};
-        std::optional<double> generic_nanoseconds_per_item;
-        for (const auto requested_backend : kCandidateBackends) {
-            const auto context = uni::simd::create_context({.backend = requested_backend});
-            if (!context.has_value()) {
-                continue;
-            }
-
-            const auto backend = context->kernel_backend(kernel);
-            const auto backend_index = static_cast<std::size_t>(backend);
-            if (backend_index >= measured_backends.size() || measured_backends[backend_index]) {
-                continue;
-            }
-            measured_backends[backend_index] = true;
-
-            require_success(operation(*context, 0U));
-            validator(0U);
-            const Statistics statistics = measure(
-                config_, profile_, item_count, bytes_per_iteration,
-                [&](const std::size_t lane) { return operation(*context, lane); }, checksum_function);
-            if (backend == uni::simd::Backend::generic) {
-                generic_nanoseconds_per_item = statistics.nanoseconds_per_item;
-            }
-            std::optional<double> speedup;
-            if (generic_nanoseconds_per_item.has_value()) {
-                speedup = *generic_nanoseconds_per_item / statistics.nanoseconds_per_item;
-            }
-            results_.add(name, uni::simd::backend_name(backend), profile_index_, statistics, speedup);
-        }
-    }
-
-    template <typename Operation, typename Validator, typename Checksum>
-    void run_runtime(const std::string_view name, const std::size_t item_count, const double bytes_per_iteration,
-                     Operation&& operation, Validator&& validator, Checksum&& checksum_function) const {
-        require_success(operation(0U));
-        validator(0U);
-        const Statistics statistics =
-            measure(config_, profile_, item_count, bytes_per_iteration, operation, checksum_function);
-        results_.add(name, "runtime", profile_index_, statistics, std::nullopt);
-    }
-
-private:
-    const Config& config_;
-    const WorkloadProfile& profile_;
-    std::size_t profile_index_;
-    BenchmarkResults& results_;
-};
-
-template <typename Value>
-[[nodiscard]] BufferLanes<Value> make_lanes(const std::size_t lane_count, const std::size_t item_count) {
-    BufferLanes<Value> lanes;
-    lanes.reserve(lane_count);
-    for (std::size_t lane = 0U; lane < lane_count; ++lane) {
-        lanes.emplace_back(item_count);
-        if (reinterpret_cast<std::uintptr_t>(lanes.back().data()) % kBufferAlignment != 0U) {
-            throw std::runtime_error("benchmark buffer alignment is insufficient");
-        }
-    }
-    return lanes;
+    return measure(
+        config, profile, workload.item_count(), workload.bytes_per_iteration(),
+        [&](const std::size_t lane) { return workload.execute(lane); },
+        [&](const std::size_t lane) { return workload.checksum(lane); });
 }
 
-void fill_bytes(AlignedBuffer<std::uint8_t>& bytes) {
-    for (std::size_t index = 0; index < bytes.size(); ++index) {
-        bytes[index] = static_cast<std::uint8_t>((index * 37U + 11U) & 0xffU);
+void run_kernel(const KernelDescription& description, const Config& config, const WorkloadProfile& profile,
+                const std::size_t profile_index, BenchmarkResults& results) {
+    Workload workload{description, profile};
+    if (description.backend_policy == BackendPolicy::runtime_only) {
+        if (workload.configure(UNI_SIMD_BACKEND_AUTOMATIC) != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error(fmt::format("{} runtime configuration failed", description.name));
+        }
+        if (workload.execute(0U) != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error(fmt::format("{} validation execution failed", description.name));
+        }
+        workload.validate(0U);
+        const Statistics statistics = measure_workload(config, profile, workload);
+        results.add(description.name, "runtime", profile_index, statistics, std::nullopt);
+        return;
+    }
+
+    std::array<bool, kBackendSlots> measured{};
+    std::optional<double> generic_nanoseconds;
+    for (const uni_simd_backend_e requested : kCandidateBackends) {
+        const uni_simd_result_e configuration_result = workload.configure(requested);
+        if (configuration_result == UNI_SIMD_RESULT_UNSUPPORTED_BACKEND) {
+            continue;
+        }
+        if (configuration_result != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error(fmt::format("{} configuration failed for requested backend {} with result {}",
+                                                 description.name, backend_name(requested), configuration_result));
+        }
+        const uni_simd_result_e result = workload.execute(0U);
+        if (result == UNI_SIMD_RESULT_UNSUPPORTED_BACKEND) {
+            continue;
+        }
+        if (result != UNI_SIMD_RESULT_SUCCESS) {
+            throw std::runtime_error(fmt::format("{} failed for requested backend {} with result {}",
+                                                 description.name, backend_name(requested), result));
+        }
+        const uni_simd_backend_e resolved = workload.resolved_backend();
+        if (resolved >= measured.size()) {
+            throw std::runtime_error(fmt::format("{} returned invalid backend {}", description.name, resolved));
+        }
+        if (measured[resolved]) {
+            continue;
+        }
+        measured[resolved] = true;
+        workload.validate(0U);
+        const Statistics statistics = measure_workload(config, profile, workload);
+        if (resolved == UNI_SIMD_BACKEND_GENERIC) {
+            generic_nanoseconds = statistics.nanoseconds_per_item;
+        }
+        const std::optional<double> speedup = generic_nanoseconds
+                                                  ? std::optional<double>{*generic_nanoseconds / statistics.nanoseconds_per_item}
+                                                  : std::nullopt;
+        results.add(description.name, backend_name(resolved), profile_index, statistics, speedup);
     }
 }
 
-void fill_bits(AlignedBuffer<std::uint8_t>& bits) {
-    for (std::size_t index = 0; index < bits.size(); ++index) {
-        bits[index] = static_cast<std::uint8_t>((index * 5U + 1U) & 1U);
-    }
-}
-
-void fill_complex(AlignedBuffer<std::complex<float>>& complex_values) {
-    for (std::size_t index = 0; index < complex_values.size(); ++index) {
-        complex_values[index] = {
-            static_cast<float>(index % 127U) / 63.5f - 1.0f,
-            static_cast<float>(index % 61U) / 30.5f - 1.0f,
-        };
-    }
-}
-
-void fill_taps(AlignedBuffer<float>& taps) {
-    for (std::size_t index = 0; index < taps.size(); ++index) {
-        taps[index] = static_cast<float>(static_cast<int>(index % 31U) - 15) / 31.0f;
-    }
-}
-
-void run_benchmark_profile(const Config& config, const WorkloadProfile& profile, const std::size_t profile_index,
-                           BenchmarkResults& results) {
-    const std::size_t byte_count = std::max<std::size_t>(64U, profile.working_set_bytes / 2U);
-    const std::size_t requested_bits = std::max<std::size_t>(64U, profile.working_set_bytes * 8U / 9U);
-    const std::size_t bit_count = requested_bits - requested_bits % 8U;
-    const std::size_t packed_count = bit_count / 8U;
-    const std::size_t quantized_count = std::max<std::size_t>(8U, profile.working_set_bytes / 10U);
-    const std::size_t magnitude_count = std::max<std::size_t>(8U, profile.working_set_bytes / 12U);
-    const std::size_t dot_count = magnitude_count;
-    std::size_t symmetric_count = std::max<std::size_t>(9U, profile.working_set_bytes / 10U);
-    if (symmetric_count % 2U == 0U) {
-        --symmetric_count;
-    }
-    const std::size_t tap_pair_count = (symmetric_count - 1U) / 2U;
-    const auto generic = uni::simd::create_context({.backend = uni::simd::Backend::generic});
-    if (!generic.has_value()) {
-        throw std::runtime_error("generic backend is unavailable");
-    }
-
-    const double byte_items = static_cast<double>(byte_count);
-    const double bit_items = static_cast<double>(bit_count);
-    const double magnitude_items = static_cast<double>(magnitude_count);
-    BenchmarkRunner runner(config, profile, profile_index, results);
-
-    {
-        auto inputs = make_lanes<std::uint8_t>(profile.address_lanes, byte_count);
-        auto outputs = make_lanes<std::uint8_t>(profile.address_lanes, byte_count);
-        for (auto& input : inputs) {
-            fill_bytes(input);
+void run_benchmark_profile(const Config& config, const WorkloadProfile& profile,
+                           const std::size_t profile_index, BenchmarkResults& results) {
+    for (const auto& description : kKernelDescriptions) {
+        if (!description.all_profiles && profile_index != 0U) {
+            continue;
         }
-
-        runner.run_runtime(
-            "copy", byte_count, byte_items * 2.0,
-            [&](const std::size_t lane) { return generic->copy(outputs[lane], inputs[lane]); },
-            [&](const std::size_t lane) { verify_exact(inputs[lane], outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-
-        AlignedBuffer<std::uint8_t> reference(byte_count);
-        require_success(generic->invert_lsb(reference, inputs[0]));
-        runner.run(
-            "invert_lsb", uni::simd::Kernel::invert_lsb, byte_count, byte_items * 2.0,
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.invert_lsb(outputs[lane], inputs[lane]);
-            },
-            [&](const std::size_t lane) { verify_exact(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-
-        require_success(generic->invert_bytes(reference, inputs[0]));
-        runner.run(
-            "invert_bytes", uni::simd::Kernel::invert_bytes, byte_count, byte_items * 2.0,
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.invert_bytes(outputs[lane], inputs[lane]);
-            },
-            [&](const std::size_t lane) { verify_exact(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-    }
-
-    {
-        auto inputs = make_lanes<std::uint8_t>(profile.address_lanes, bit_count);
-        auto outputs = make_lanes<std::uint8_t>(profile.address_lanes, packed_count);
-        for (auto& input : inputs) {
-            fill_bits(input);
-        }
-        AlignedBuffer<std::uint8_t> reference(packed_count);
-
-        require_success(generic->pack_bits_lsb(reference, inputs[0]));
-        runner.run(
-            "pack_bits_lsb", uni::simd::Kernel::pack_bits_lsb, bit_count, bit_items + static_cast<double>(packed_count),
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.pack_bits_lsb(outputs[lane], inputs[lane]);
-            },
-            [&](const std::size_t lane) { verify_exact(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-
-        require_success(generic->pack_bits_msb(reference, inputs[0]));
-        runner.run(
-            "pack_bits_msb", uni::simd::Kernel::pack_bits_msb, bit_count, bit_items + static_cast<double>(packed_count),
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.pack_bits_msb(outputs[lane], inputs[lane]);
-            },
-            [&](const std::size_t lane) { verify_exact(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-    }
-
-    const auto run_unpack = [&](const std::string_view name, const uni::simd::Kernel kernel, const bool msb) {
-        AlignedBuffer<std::uint8_t> bits(bit_count);
-        fill_bits(bits);
-        AlignedBuffer<std::uint8_t> packed(packed_count);
-        require_success(msb ? generic->pack_bits_msb(packed, bits) : generic->pack_bits_lsb(packed, bits));
-        auto inputs = make_lanes<std::uint8_t>(profile.address_lanes, packed_count);
-        auto outputs = make_lanes<std::uint8_t>(profile.address_lanes, bit_count);
-        for (auto& input : inputs) {
-            input = packed;
-        }
-        AlignedBuffer<std::uint8_t> reference(bit_count);
-        require_success(msb ? generic->unpack_bits_msb(reference, packed)
-                            : generic->unpack_bits_lsb(reference, packed));
-        runner.run(
-            name, kernel, bit_count, bit_items + static_cast<double>(packed_count),
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return msb ? context.unpack_bits_msb(outputs[lane], inputs[lane])
-                           : context.unpack_bits_lsb(outputs[lane], inputs[lane]);
-            },
-            [&](const std::size_t lane) { verify_exact(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-    };
-    run_unpack("unpack_bits_lsb", uni::simd::Kernel::unpack_bits_lsb, false);
-    run_unpack("unpack_bits_msb", uni::simd::Kernel::unpack_bits_msb, true);
-
-    {
-        auto inputs = make_lanes<std::complex<float>>(profile.address_lanes, quantized_count);
-        auto outputs = make_lanes<std::uint8_t>(profile.address_lanes, quantized_count * 2U);
-        for (auto& input : inputs) {
-            fill_complex(input);
-        }
-        AlignedBuffer<std::uint8_t> reference(quantized_count * 2U);
-        require_success(generic->quantize_interleaved_cf32_u8(reference, inputs[0], {.scale = -7.0f}));
-        runner.run(
-            "quantize_interleaved_cf32_u8", uni::simd::Kernel::quantize_interleaved_cf32_u8, quantized_count,
-            static_cast<double>(quantized_count) * 10.0,
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.quantize_interleaved_cf32_u8(outputs[lane], inputs[lane], {.scale = -7.0f});
-            },
-            [&](const std::size_t lane) { verify_exact(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-    }
-
-    {
-        auto inputs = make_lanes<std::complex<float>>(profile.address_lanes, magnitude_count);
-        auto outputs = make_lanes<float>(profile.address_lanes, magnitude_count);
-        for (auto& input : inputs) {
-            fill_complex(input);
-        }
-        AlignedBuffer<float> reference(magnitude_count);
-
-        require_success(generic->magnitude_squared(reference, inputs[0], 3.0f));
-        runner.run(
-            "magnitude_squared_cf32", uni::simd::Kernel::magnitude_squared_cf32, magnitude_count,
-            magnitude_items * 12.0,
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.magnitude_squared(outputs[lane], inputs[lane], 3.0f);
-            },
-            [&](const std::size_t lane) { verify_floats(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-
-        require_success(generic->power_spectral_density(reference, inputs[0], 3.0f, 2.0f));
-        // PSD uses the same backend selection as magnitude_squared, but has no
-        // separate Kernel enum value.
-        runner.run(
-            "power_spectral_density_cf32", uni::simd::Kernel::magnitude_squared_cf32, magnitude_count,
-            magnitude_items * 12.0,
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.power_spectral_density(outputs[lane], inputs[lane], 3.0f, 2.0f);
-            },
-            [&](const std::size_t lane) { verify_floats(reference, outputs[lane]); },
-            [&](const std::size_t lane) { return checksum(outputs[lane]); });
-    }
-
-    {
-        auto inputs = make_lanes<std::complex<float>>(profile.address_lanes, dot_count);
-        auto taps = make_lanes<float>(profile.address_lanes, dot_count);
-        for (auto& input : inputs) {
-            fill_complex(input);
-        }
-        for (auto& lane_taps : taps) {
-            fill_taps(lane_taps);
-        }
-        AlignedValue<std::complex<float>> reference;
-        AlignedBuffer<AlignedValue<std::complex<float>>> outputs(profile.address_lanes);
-        require_success(generic->dot_cf32_f32(reference.value, inputs[0], taps[0]));
-        runner.run(
-            "dot_cf32_f32", uni::simd::Kernel::dot_cf32_f32, dot_count,
-            static_cast<double>(dot_count) * 12.0 + static_cast<double>(sizeof(std::complex<float>)),
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.dot_cf32_f32(outputs[lane].value, inputs[lane], taps[lane]);
-            },
-            [&](const std::size_t lane) { verify_complex(reference.value, outputs[lane].value, dot_count); },
-            [&](const std::size_t lane) { return checksum(outputs[lane].value); });
-    }
-
-    const double symmetric_bytes = static_cast<double>(symmetric_count) * sizeof(std::complex<float>) +
-                                   static_cast<double>(tap_pair_count) * sizeof(float) + sizeof(float) +
-                                   sizeof(std::complex<float>);
-    {
-        auto inputs = make_lanes<std::complex<float>>(profile.address_lanes, symmetric_count);
-        auto taps = make_lanes<float>(profile.address_lanes, tap_pair_count);
-        for (auto& input : inputs) {
-            fill_complex(input);
-        }
-        for (auto& lane_taps : taps) {
-            fill_taps(lane_taps);
-        }
-        AlignedValue<std::complex<float>> reference;
-        AlignedBuffer<AlignedValue<std::complex<float>>> outputs(profile.address_lanes);
-        require_success(generic->dot_symmetric_cf32_f32(reference.value, inputs[0], taps[0], 0.25f));
-        runner.run(
-            "dot_symmetric_cf32_f32", uni::simd::Kernel::dot_symmetric_cf32_f32, symmetric_count, symmetric_bytes,
-            [&](const uni::simd::Context& context, const std::size_t lane) {
-                return context.dot_symmetric_cf32_f32(outputs[lane].value, inputs[lane], taps[lane], 0.25f);
-            },
-            [&](const std::size_t lane) { verify_complex(reference.value, outputs[lane].value, symmetric_count); },
-            [&](const std::size_t lane) { return checksum(outputs[lane].value); });
+        run_kernel(description, config, profile, profile_index, results);
     }
 }
 
 void run_benchmarks_on_core(const Config& config, const topology::CoreClass& core_class,
-                            const topology::ThreadAffinityStatus affinity_status, const std::size_t class_index,
-                            const std::size_t class_count) {
+                            const topology::ThreadAffinityStatus affinity_status,
+                            const std::size_t class_index, const std::size_t class_count) {
     BenchmarkResults results;
     for (std::size_t profile_index = 0U; profile_index < kWorkloadProfiles.size(); ++profile_index) {
         run_benchmark_profile(config, kWorkloadProfiles[profile_index], profile_index, results);
@@ -803,7 +1189,6 @@ void run_benchmarks_on_core(const Config& config, const topology::CoreClass& cor
     if (members.empty()) {
         return "n/a";
     }
-
     std::sort(members.begin(), members.end());
     std::string result;
     const auto append_range = [&](const int first, const int last) {
@@ -848,14 +1233,16 @@ void print_topology_table(const Config& config, const topology::Result& result,
     print_summary_row("Model", result.snapshot.model_name);
     print_summary_row("Processors", fmt::format("{} logical / {} physical", result.snapshot.logical_processor_count,
                                                 result.snapshot.physical_core_count));
-    print_summary_row("Packages / NUMA nodes",
-                      fmt::format("{} / {}", result.snapshot.package_count, result.snapshot.numa_node_count));
+    print_summary_row("Packages / NUMA nodes", fmt::format("{} / {}", result.snapshot.package_count,
+                                                            result.snapshot.numa_node_count));
     print_summary_row("Core types", std::to_string(core_classes.size()));
+    print_summary_row("Kernels", fmt::format("{} table entries covering 14 public kernels", kKernelDescriptions.size()));
     print_summary_row("Working sets", std::move(working_sets));
-    print_summary_row("Measurement", fmt::format("samples={}, warmup batches={}, target={} ms", config.samples,
-                                                 config.warmup_batches, config.sample_milliseconds));
+    print_summary_row("Measurement", fmt::format("{}: iterations={}, warmup={}, target={} ms", config.preset,
+                                                 config.iterations, config.warmup, config.sample_milliseconds));
     print_summary_row("Buffers", fmt::format("{}-byte aligned; address lanes={}", kBufferAlignment, address_lanes));
-    print_summary_row("Cache policy", "rotate addresses; prewarm through 32 MiB; stream 256 MiB");
+    print_summary_row("Cache policy", "rotate addresses; prewarm through 32 MiB; stream 64 MiB");
+    print_summary_row("PFB working set", "payload plus equal-sized C API conversion scratch; GiB/s reports payload");
     fmt::print("{}\n\n", summary_border);
 
     constexpr std::array<std::size_t, 8U> core_widths{3U, 10U, 7U, 31U, 7U, 7U, 7U, 7U};
@@ -873,14 +1260,14 @@ void print_topology_table(const Config& config, const topology::Result& result,
         };
         const std::string l1 = cache_kib(processor.l1_data_cache_bytes);
         const std::string l2 = cache_kib(processor.l2_cache_bytes);
-        const std::string l3 =
-            processor.l3_cache_bytes == 0U
-                ? "n/a"
-                : fmt::format("{:.1f}", static_cast<double>(processor.l3_cache_bytes) / (1024.0 * 1024.0));
-        const std::string frequency =
-            processor.max_frequency_khz == 0U
-                ? "n/a"
-                : fmt::format("{:.2f}", static_cast<double>(processor.max_frequency_khz) / 1'000'000.0);
+        const std::string l3 = processor.l3_cache_bytes == 0U
+                                   ? "n/a"
+                                   : fmt::format("{:.1f}", static_cast<double>(processor.l3_cache_bytes) /
+                                                                  (1024.0 * 1024.0));
+        const std::string frequency = processor.max_frequency_khz == 0U
+                                          ? "n/a"
+                                          : fmt::format("{:.2f}", static_cast<double>(processor.max_frequency_khz) /
+                                                                     1'000'000.0);
         fmt::print("| {:>3} | {:<10} | {:>7} | {:<31} | {:>7} | {:>7} | {:>7} | {:>7} |\n", index + 1U,
                    fit_text(core_type_name(core_class), 10U), processor.logical_processor_id,
                    fit_text(collect_members(result.snapshot, core_class.key), 31U), l1, l2, l3, frequency);
@@ -897,7 +1284,6 @@ void run_benchmarks(const Config& config) {
     if (core_classes.empty()) {
         throw std::runtime_error("CPU topology did not provide a pinnable core class");
     }
-
     print_topology_table(config, topology_result, core_classes);
 
     for (std::size_t index = 0U; index < core_classes.size(); ++index) {
@@ -933,6 +1319,7 @@ int main(const int argc, char** argv) {
     }
 
     try {
+        const SimdRuntime runtime;
         run_benchmarks(config);
     } catch (const std::exception& error) {
         std::cerr << "Benchmark failed: " << error.what() << '\n';

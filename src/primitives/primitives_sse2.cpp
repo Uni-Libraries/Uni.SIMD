@@ -281,23 +281,23 @@ void MapQPSK_CF32_U8_sse2(void* dst, const void* src, size_t len, float gain) {
     }
 }
 
-void PowerSpectrumCF32F32_sse2(float* dst, const std::complex<float>* src, const size_t len, const float normalization_factor) noexcept {
+void PowerSpectrumCF32F32_sse2(float* dst, const void* src, const size_t len, const float normalization_factor) noexcept {
     if (!dst || !src || len == 0U || !std::isfinite(normalization_factor) || normalization_factor <= 0.0f) {
         return;
     }
 
     const float inv_norm = 1.0f / normalization_factor;
-    power_spectrum_cf32f32_sse2_impl(dst, static_cast<const float*>(static_cast<const void*>(src)), len, inv_norm, 1.0f);
+    power_spectrum_cf32f32_sse2_impl(dst, static_cast<const float*>(src), len, inv_norm, 1.0f);
 }
 
-void PowerSpectralDensityCF32F32_sse2(float* dst, const std::complex<float>* src, const size_t len, const float normalization_factor,
+void PowerSpectralDensityCF32F32_sse2(float* dst, const void* src, const size_t len, const float normalization_factor,
                                       const float rbw_hz) noexcept {
     if (!dst || !src || len == 0U || !std::isfinite(normalization_factor) || normalization_factor <= 0.0f || !std::isfinite(rbw_hz) || rbw_hz <= 0.0f) {
         return;
     }
 
     const float component_scale = (1.0f / normalization_factor) / std::sqrt(rbw_hz);
-    power_spectrum_cf32f32_sse2_impl(dst, static_cast<const float*>(static_cast<const void*>(src)), len, component_scale, 1.0f);
+    power_spectrum_cf32f32_sse2_impl(dst, static_cast<const float*>(src), len, component_scale, 1.0f);
 }
 
 } // namespace uni::simd::detail

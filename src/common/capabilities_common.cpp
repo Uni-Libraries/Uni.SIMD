@@ -1,4 +1,4 @@
-#include <uni/simd/capabilities.hpp>
+#include "common/api_internal.hpp"
 
 #include <cstdint>
 

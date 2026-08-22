@@ -2,7 +2,7 @@
 #undef NDEBUG
 #endif
 
-#include <uni/simd/simd.hpp>
+#include "common/api_internal.hpp"
 
 #include <array>
 #include <cassert>

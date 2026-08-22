@@ -1,0 +1,298 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
+#include "common/api_internal.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <complex>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <vector>
+
+namespace {
+
+using Complex = std::complex<float>;
+constexpr double pi = 3.141592653589793238462643383279502884;
+
+struct RunResult final {
+    std::vector<std::vector<Complex>> outputs;
+    std::size_t produced = 0U;
+    uni::simd::Backend backend = uni::simd::Backend::generic;
+};
+
+[[nodiscard]] std::vector<float> make_taps(const std::size_t count) {
+    std::vector<float> taps(count);
+    const float scale = 0.5f / std::sqrt(static_cast<float>(count));
+    for (std::size_t index = 0U; index < count; ++index) {
+        const float centered = static_cast<float>(static_cast<std::int64_t>(index) - static_cast<std::int64_t>(count / 2U));
+        taps[index] = scale * (0.7f * std::cos(centered * 0.173f) + 0.3f * std::sin(centered * 0.071f));
+    }
+    return taps;
+}
+
+[[nodiscard]] std::vector<Complex> make_input(const std::size_t count) {
+    std::vector<Complex> input(count);
+    std::uint32_t random = 0x12345678U;
+    for (auto& sample : input) {
+        random = random * 1664525U + 1013904223U;
+        const float real = static_cast<float>(static_cast<std::int32_t>(random)) / 2147483648.0f;
+        random = random * 1664525U + 1013904223U;
+        const float imag = static_cast<float>(static_cast<std::int32_t>(random)) / 2147483648.0f;
+        sample = {real, imag};
+    }
+    return input;
+}
+
+[[nodiscard]] RunResult run(const uni::simd::Context& context, const uni::simd::PfbChannelizerConfig& config,
+                            const std::span<const Complex> input,
+                            const std::span<const std::size_t> split_pattern = {}) {
+    auto channelizer_result = context.make_pfb_channelizer(config);
+    assert(channelizer_result.has_value());
+    auto channelizer = std::move(*channelizer_result);
+    RunResult result;
+    result.backend = channelizer.backend();
+    const auto total = channelizer.output_count(input.size());
+    assert(total.has_value());
+    result.outputs.resize(config.logical_bins.size());
+    for (auto& output : result.outputs) {
+        output.resize(*total);
+    }
+
+    std::size_t input_offset = 0U;
+    std::size_t split_index = 0U;
+    bool called = false;
+    do {
+        const std::size_t requested = split_pattern.empty() ? input.size() : split_pattern[split_index++ % split_pattern.size()];
+        const std::size_t count = std::min(requested, input.size() - input_offset);
+        uni::simd::PfbChannelizerBlock block{.input = input.subspan(input_offset, count)};
+        for (std::size_t output = 0U; output < result.outputs.size(); ++output) {
+            block.outputs[output] = std::span<Complex>{result.outputs[output]}.subspan(result.produced);
+        }
+        const auto produced = channelizer.process(block);
+        assert(produced.has_value());
+        result.produced += *produced;
+        input_offset += count;
+        called = true;
+    } while (input_offset < input.size() || !called);
+    assert(result.produced == *total);
+    return result;
+}
+
+[[nodiscard]] std::vector<std::vector<std::complex<double>>>
+direct_reference(const uni::simd::PfbChannelizerConfig& config, const std::span<const Complex> input) {
+    const std::size_t count = input.empty() ? 0U : 1U + (input.size() - 1U) / config.decimation;
+    std::vector<std::vector<std::complex<double>>> result(config.logical_bins.size(),
+                                                          std::vector<std::complex<double>>(count));
+    const double delta = config.grid_offset == uni::simd::PfbGridOffset::half_bins ? 0.5 : 0.0;
+    for (std::size_t output = 0U; output < config.logical_bins.size(); ++output) {
+        const double frequency_bin = static_cast<double>(config.logical_bins[output]) + delta;
+        for (std::size_t hop = 0U; hop < count; ++hop) {
+            const std::size_t sample_index = hop * config.decimation;
+            std::complex<double> accumulator{};
+            for (std::size_t tap = 0U; tap < std::min(config.taps.size(), sample_index + 1U); ++tap) {
+                const std::size_t source_index = sample_index - tap;
+                const double angle = -2.0 * pi * frequency_bin * static_cast<double>(source_index) /
+                                     static_cast<double>(config.bin_count);
+                accumulator += static_cast<double>(config.taps[tap]) *
+                               std::complex<double>{input[source_index].real(), input[source_index].imag()} *
+                               std::complex<double>{std::cos(angle), std::sin(angle)};
+            }
+            result[output][hop] = accumulator;
+        }
+    }
+    return result;
+}
+
+void compare_reference(const RunResult& actual,
+                       const std::vector<std::vector<std::complex<double>>>& expected,
+                       const float absolute_tolerance = 3.0e-5f,
+                       const float relative_tolerance = 4.0e-4f) {
+    assert(actual.outputs.size() == expected.size());
+    for (std::size_t output = 0U; output < expected.size(); ++output) {
+        assert(actual.outputs[output].size() == expected[output].size());
+        for (std::size_t index = 0U; index < expected[output].size(); ++index) {
+            const Complex reference{static_cast<float>(expected[output][index].real()),
+                                    static_cast<float>(expected[output][index].imag())};
+            const float tolerance = absolute_tolerance + relative_tolerance * std::abs(reference);
+            assert(std::isfinite(actual.outputs[output][index].real()));
+            assert(std::isfinite(actual.outputs[output][index].imag()));
+            assert(std::abs(actual.outputs[output][index] - reference) <= tolerance);
+        }
+    }
+}
+
+void compare_runs(const RunResult& reference, const RunResult& actual) {
+    assert(reference.produced == actual.produced);
+    assert(reference.outputs.size() == actual.outputs.size());
+    for (std::size_t output = 0U; output < reference.outputs.size(); ++output) {
+        for (std::size_t index = 0U; index < reference.outputs[output].size(); ++index) {
+            const float tolerance = 3.0e-5f + 5.0e-4f * std::abs(reference.outputs[output][index]);
+            assert(std::abs(reference.outputs[output][index] - actual.outputs[output][index]) <= tolerance);
+        }
+    }
+}
+
+void test_validation(const uni::simd::Context& generic) {
+    const std::array<float, 1U> tap{1.0f};
+    constexpr std::array<std::int32_t, 2U> bins{-1, 1};
+    auto create = [&](const uni::simd::PfbChannelizerConfig& config) { return generic.make_pfb_channelizer(config); };
+    assert(!create({.bin_count = 3U, .decimation = 1U, .taps = tap}).has_value());
+    assert(!create({.bin_count = 8U, .decimation = 0U, .taps = tap}).has_value());
+    assert(!create({.bin_count = 8U, .decimation = 3U, .taps = tap}).has_value());
+    assert(!create({.bin_count = 8U, .decimation = 4U}).has_value());
+    std::vector<float> too_many(uni::simd::pfb_channelizer_max_taps + 1U, 1.0f);
+    assert(!create({.bin_count = 8U, .decimation = 4U, .taps = too_many}).has_value());
+    for (const float bad : {std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::quiet_NaN()}) {
+        const std::array bad_tap{bad};
+        assert(!create({.bin_count = 8U, .decimation = 4U, .taps = bad_tap}).has_value());
+    }
+    constexpr std::array duplicate{std::int32_t{0}, std::int32_t{0}};
+    assert(!create({.bin_count = 8U, .decimation = 4U, .taps = tap, .logical_bins = duplicate}).has_value());
+    constexpr std::array out_of_range{std::int32_t{4}};
+    assert(!create({.bin_count = 8U, .decimation = 4U, .taps = tap, .logical_bins = out_of_range}).has_value());
+
+    auto channelizer = create({.bin_count = 8U, .decimation = 4U, .grid_offset = uni::simd::PfbGridOffset::half_bins,
+                               .taps = tap, .logical_bins = bins});
+    assert(channelizer.has_value());
+    const auto input = make_input(17U);
+    std::array<Complex, 4U> short_output{};
+    std::array<Complex, 5U> full_output{};
+    uni::simd::PfbChannelizerBlock short_block{.input = input};
+    short_block.outputs[0] = short_output;
+    short_block.outputs[1] = full_output;
+    const auto short_result = channelizer->process(short_block);
+    assert(!short_result && short_result.error() == uni::simd::Result::invalid_size);
+
+    std::array<Complex, 5U> shared{};
+    uni::simd::PfbChannelizerBlock overlap{.input = input};
+    overlap.outputs[0] = shared;
+    overlap.outputs[1] = shared;
+    const auto overlap_result = channelizer->process(overlap);
+    assert(!overlap_result && overlap_result.error() == uni::simd::Result::overlapping_buffers);
+
+    auto aliased_input = make_input(17U);
+    uni::simd::PfbChannelizerBlock input_overlap{.input = aliased_input};
+    input_overlap.outputs[0] = std::span<Complex>{aliased_input}.first(5U);
+    input_overlap.outputs[1] = full_output;
+    const auto input_overlap_result = channelizer->process(input_overlap);
+    assert(!input_overlap_result && input_overlap_result.error() == uni::simd::Result::overlapping_buffers);
+}
+
+void test_scalar_reference(const uni::simd::Context& generic) {
+    constexpr std::array<std::size_t, 14U> tap_counts{1U, 2U, 3U, 7U, 8U, 9U, 31U, 32U, 33U, 168U, 169U, 257U, 1024U, 1025U};
+    const auto input = make_input(43U);
+    for (const std::size_t bin_count : {4U, 8U, 16U, 32U}) {
+        for (std::size_t decimation = 1U; decimation <= bin_count; decimation *= 2U) {
+            for (const auto grid : {uni::simd::PfbGridOffset::integer_bins, uni::simd::PfbGridOffset::half_bins}) {
+                for (const std::size_t tap_count : tap_counts) {
+                    const auto taps = make_taps(tap_count);
+                    std::array<std::int32_t, uni::simd::pfb_channelizer_max_outputs> selected{};
+                    const std::size_t selected_count = std::min<std::size_t>(selected.size(), bin_count);
+                    for (std::size_t index = 0U; index < selected_count; ++index) {
+                        selected[index] = static_cast<std::int32_t>(index) - static_cast<std::int32_t>(bin_count / 2U);
+                    }
+                    const uni::simd::PfbChannelizerConfig config{
+                        .bin_count = bin_count, .decimation = decimation, .grid_offset = grid, .taps = taps,
+                        .logical_bins = {selected.data(), selected_count}};
+                    compare_reference(run(generic, config, input), direct_reference(config, input));
+                }
+            }
+        }
+    }
+}
+
+void test_streaming_alignment_and_wrap(const uni::simd::Context& generic) {
+    constexpr std::array<std::int32_t, 8U> bins{-4, -3, -2, -1, 0, 1, 2, 3};
+    constexpr std::array<std::size_t, 9U> splits{1U, 2U, 3U, 5U, 7U, 17U, 31U, 64U, 11U};
+    const auto taps = make_taps(1025U);
+    auto storage = make_input(5004U);
+    const std::span<const Complex> unaligned_input{storage.data() + 1U, 5003U};
+    const uni::simd::PfbChannelizerConfig config{
+        .bin_count = 8U, .decimation = 4U, .grid_offset = uni::simd::PfbGridOffset::half_bins,
+        .taps = taps, .logical_bins = bins};
+    const auto whole = run(generic, config, unaligned_input);
+    const auto split = run(generic, config, unaligned_input, splits);
+    assert(whole.outputs == split.outputs);
+    compare_reference(whole, direct_reference(config, unaligned_input), 5.0e-5f, 7.0e-4f);
+
+    const uni::simd::PfbChannelizerConfig no_outputs{
+        .bin_count = 8U, .decimation = 4U, .grid_offset = uni::simd::PfbGridOffset::half_bins, .taps = taps};
+    const auto zero = run(generic, no_outputs, unaligned_input, splits);
+    assert(zero.outputs.empty() && zero.produced == 1U + (unaligned_input.size() - 1U) / 4U);
+}
+
+void test_dispatch(const uni::simd::Context& generic) {
+    constexpr std::array<std::int32_t, 4U> bins{-2, -1, 0, 1};
+    const auto taps = make_taps(169U);
+    const auto input = make_input(1031U);
+    const uni::simd::PfbChannelizerConfig accelerated{
+        .bin_count = 8U, .decimation = 4U, .grid_offset = uni::simd::PfbGridOffset::half_bins,
+        .taps = taps, .logical_bins = bins};
+    const auto reference = run(generic, accelerated, input);
+    assert(reference.backend == uni::simd::Backend::generic);
+    constexpr std::array<std::size_t, 9U> splits{1U, 2U, 3U, 4U, 5U, 7U, 17U, 31U, 11U};
+
+    for (const auto backend : {uni::simd::Backend::avx2_fma, uni::simd::Backend::neon}) {
+        const auto context = uni::simd::create_context({.backend = backend});
+        if (!context) {
+            assert(context.error() == uni::simd::Result::unsupported_backend);
+            continue;
+        }
+        const auto actual = run(*context, accelerated, input);
+        assert(actual.backend == backend);
+        compare_runs(reference, actual);
+        const auto split = run(*context, accelerated, input, splits);
+        assert(actual.outputs == split.outputs);
+
+        auto reset_channelizer = context->make_pfb_channelizer(accelerated);
+        assert(reset_channelizer.has_value());
+        const std::size_t count = *reset_channelizer->output_count(input.size());
+        std::array<std::vector<Complex>, 4U> first_outputs;
+        std::array<std::vector<Complex>, 4U> second_outputs;
+        uni::simd::PfbChannelizerBlock first_block{.input = input};
+        uni::simd::PfbChannelizerBlock second_block{.input = input};
+        for (std::size_t output = 0U; output < first_outputs.size(); ++output) {
+            first_outputs[output].resize(count);
+            second_outputs[output].resize(count);
+            first_block.outputs[output] = first_outputs[output];
+            second_block.outputs[output] = second_outputs[output];
+        }
+        assert(reset_channelizer->process(first_block) == count);
+        assert(reset_channelizer->reset() == uni::simd::Result::success);
+        assert(reset_channelizer->process(second_block) == count);
+        assert(first_outputs == second_outputs);
+
+        constexpr std::array<std::int32_t, 2U> fallback_bins{-2, 3};
+        const uni::simd::PfbChannelizerConfig fallback{
+            .bin_count = 16U, .decimation = 8U, .grid_offset = uni::simd::PfbGridOffset::integer_bins,
+            .taps = taps, .logical_bins = fallback_bins};
+        const auto fallback_actual = run(*context, fallback, input);
+        assert(fallback_actual.backend == uni::simd::Backend::generic);
+        compare_runs(run(generic, fallback, input), fallback_actual);
+    }
+
+    const auto deterministic = uni::simd::create_context({.math_mode = uni::simd::MathMode::deterministic});
+    assert(deterministic.has_value());
+    const auto first = run(*deterministic, accelerated, input);
+    const auto second = run(*deterministic, accelerated, input);
+    assert(first.backend == uni::simd::Backend::generic && first.outputs == second.outputs);
+}
+
+} // namespace
+
+int main() {
+    const auto generic = uni::simd::create_context({.backend = uni::simd::Backend::generic});
+    assert(generic.has_value());
+    test_validation(*generic);
+    test_scalar_reference(*generic);
+    test_streaming_alignment_and_wrap(*generic);
+    test_dispatch(*generic);
+    return 0;
+}

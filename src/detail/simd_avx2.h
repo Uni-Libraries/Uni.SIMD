@@ -23,8 +23,8 @@ void Pack8_MSB_avx2(void* dst, const void* src, size_t len);
 void Unpack8_LSB_avx2(void* dst, const void* src, size_t len);
 void Unpack8_MSB_avx2(void* dst, const void* src, size_t len);
 void MapQPSK_CF32_U8_avx2(void* dst, const void* src, size_t len, float gain);
-void PowerSpectrumCF32F32_avx2(float* dst, const std::complex<float>* src, size_t len, float normalization_factor) noexcept;
-void PowerSpectralDensityCF32F32_avx2(float* dst, const std::complex<float>* src, size_t len, float normalization_factor, float rbw_hz) noexcept;
+void PowerSpectrumCF32F32_avx2(float* dst, const void* src, size_t len, float normalization_factor) noexcept;
+void PowerSpectralDensityCF32F32_avx2(float* dst, const void* src, size_t len, float normalization_factor, float rbw_hz) noexcept;
 
 [[nodiscard]] std::complex<float> DotProdCF32Real_avx2(const void* src, const float* taps, size_t len) noexcept;
 
