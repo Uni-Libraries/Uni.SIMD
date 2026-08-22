@@ -18,7 +18,7 @@
 
 #include <fmt/format.h>
 
-#include <uni/simd/uni_simd.h>
+#include <uni_simd.h>
 
 #include "cpu_topology.hpp"
 

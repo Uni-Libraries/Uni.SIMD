@@ -19,15 +19,15 @@ add_library(UniSIMD)
 add_library(Uni::SIMD ALIAS UniSIMD)
 
 include(GenerateExportHeader)
-file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/uni/simd")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/")
 generate_export_header(UniSIMD
-    EXPORT_FILE_NAME "${CMAKE_CURRENT_BINARY_DIR}/generated/uni/simd/uni_simd_export.h"
+    EXPORT_FILE_NAME "${CMAKE_CURRENT_BINARY_DIR}/generated/uni_simd_export.h"
     EXPORT_MACRO_NAME UNI_SIMD_API
     NO_EXPORT_MACRO_NAME UNI_SIMD_NO_EXPORT
     STATIC_DEFINE UNI_SIMD_STATIC)
 configure_file(
     cmake/uni_simd_version.h.in
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/uni/simd/uni_simd_version.h"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/uni_simd_version.h"
     @ONLY)
 
 target_compile_features(UniSIMD PRIVATE cxx_std_23)
@@ -137,11 +137,11 @@ if(PROJECT_IS_TOP_LEVEL)
             LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
             RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(FILES
-            include/uni/simd/uni_simd.h
-            include/uni/simd/uni_simd_kernels.h
-            include/uni/simd/uni_simd_typedefs.h
-            "${CMAKE_CURRENT_BINARY_DIR}/generated/uni/simd/uni_simd_export.h"
-            "${CMAKE_CURRENT_BINARY_DIR}/generated/uni/simd/uni_simd_version.h"
+            include/uni_simd.h
+            include/uni_simd_kernels.h
+            include/uni_simd_typedefs.h
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/uni_simd_export.h"
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/uni_simd_version.h"
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/uni/simd")
     install(EXPORT UniSIMDTargets FILE UniSIMDTargets.cmake NAMESPACE Uni:: DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/UniSIMD")
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/UniSIMDConfig.cmake" "${CMAKE_CURRENT_BINARY_DIR}/UniSIMDConfigVersion.cmake"

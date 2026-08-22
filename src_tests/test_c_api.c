@@ -2,7 +2,7 @@
 #undef NDEBUG
 #endif
 
-#include <uni/simd/uni_simd.h>
+#include <uni_simd.h>
 
 #include <assert.h>
 #include <math.h>

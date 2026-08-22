@@ -1,9 +1,9 @@
 #pragma once
 
-#include <uni/simd/uni_simd_export.h>
-#include <uni/simd/uni_simd_kernels.h>
-#include <uni/simd/uni_simd_typedefs.h>
-#include <uni/simd/uni_simd_version.h>
+#include <uni_simd_export.h>
+#include <uni_simd_kernels.h>
+#include <uni_simd_typedefs.h>
+#include <uni_simd_version.h>
 
 #ifdef __cplusplus
 extern "C" {

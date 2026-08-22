@@ -1,4 +1,4 @@
-#include <uni/simd/uni_simd.h>
+#include <uni_simd.h>
 
 #include "common/api_internal.hpp"
 
