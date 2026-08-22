@@ -1,6 +1,7 @@
 #include "pfb_channelizer/pfb_channelizer_internal.hpp"
 #include "ifft_cf32/ifft_cf32_internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 
@@ -14,110 +15,174 @@ namespace {
     return vrev64q_f32(vextq_f32(value, value, 2));
 }
 
-} // namespace
+[[nodiscard]] inline float horizontal_sum(const float32x4_t value) noexcept {
+    const float32x2_t halves = vadd_f32(vget_low_f32(value), vget_high_f32(value));
+    return vget_lane_f32(vpadd_f32(halves, halves), 0);
+}
 
-std::size_t PfbChannelizer_neon(PfbChannelizerData& data, const PfbChannelizerBlock& block) noexcept {
-    const auto& plan = data;
-    auto& state = data;
-
-    constexpr std::size_t bins = 8U;
-    constexpr std::size_t decimation = 4U;
-    const std::size_t rows = PfbChannelizerAccess::rows(plan);
-    const std::size_t history_size = PfbChannelizerAccess::history_size(plan);
-    const std::size_t history_mask = history_size - 1U;
-    const std::size_t selected_count = plan.selected_output_count();
-    const std::size_t phase_period = PfbChannelizerAccess::phase_period(plan);
-    const float* coefficients = PfbChannelizerAccess::reversed_coefficients(plan);
-    const float* rotations_re = PfbChannelizerAccess::branch_rotation_re(plan);
-    const float* rotations_im = PfbChannelizerAccess::branch_rotation_im(plan);
-    const float32x4_t rotation_re0 = vld1q_f32(rotations_re);
-    const float32x4_t rotation_re1 = vld1q_f32(rotations_re + 4U);
-    const float32x4_t rotation_im0 = vld1q_f32(rotations_im);
-    const float32x4_t rotation_im1 = vld1q_f32(rotations_im + 4U);
-    float* history_i = PfbChannelizerAccess::history_i(state);
-    float* history_q = PfbChannelizerAccess::history_q(state);
-    std::size_t cursor = PfbChannelizerAccess::cursor(state);
-    std::size_t decimation_phase = PfbChannelizerAccess::decimation_phase(state);
-    std::size_t post_phase = PfbChannelizerAccess::post_phase(state);
-    std::size_t produced = 0U;
-
-    alignas(16) std::array<float, pfb_channelizer_max_bins> fft_re{};
-    alignas(16) std::array<float, pfb_channelizer_max_bins> fft_im{};
-
-    for (std::size_t input_index = 0U; input_index < block.input.size() / 2U; ++input_index) {
-        const float sample_re = block.input[2U * input_index];
-        const float sample_im = block.input[2U * input_index + 1U];
-        history_i[cursor] = sample_re;
-        history_i[cursor + history_size] = sample_re;
-        history_q[cursor] = sample_im;
-        history_q[cursor + history_size] = sample_im;
-
-        if (decimation_phase == 0U) {
-            if (selected_count != 0U) {
-                float32x4_t accumulator_re0 = vdupq_n_f32(0.0f);
-                float32x4_t accumulator_re1 = vdupq_n_f32(0.0f);
-                float32x4_t accumulator_im0 = vdupq_n_f32(0.0f);
-                float32x4_t accumulator_im1 = vdupq_n_f32(0.0f);
-                for (std::size_t row = 0U; row < rows; ++row) {
-                    const float32x4_t coefficient0 = vld1q_f32(coefficients + row * bins);
-                    const float32x4_t coefficient1 = vld1q_f32(coefficients + row * bins + 4U);
-                    const std::size_t first_sample = cursor + history_size - row * bins - (bins - 1U);
-                    const float32x4_t samples_re0 = vld1q_f32(history_i + first_sample);
-                    const float32x4_t samples_re1 = vld1q_f32(history_i + first_sample + 4U);
-                    const float32x4_t samples_im0 = vld1q_f32(history_q + first_sample);
-                    const float32x4_t samples_im1 = vld1q_f32(history_q + first_sample + 4U);
-                    accumulator_re0 = vfmaq_f32(accumulator_re0, samples_re0, coefficient0);
-                    accumulator_re1 = vfmaq_f32(accumulator_re1, samples_re1, coefficient1);
-                    accumulator_im0 = vfmaq_f32(accumulator_im0, samples_im0, coefficient0);
-                    accumulator_im1 = vfmaq_f32(accumulator_im1, samples_im1, coefficient1);
-                }
-
-                const float32x4_t natural_re0 = reverse_lanes(accumulator_re1);
-                const float32x4_t natural_re1 = reverse_lanes(accumulator_re0);
-                const float32x4_t natural_im0 = reverse_lanes(accumulator_im1);
-                const float32x4_t natural_im1 = reverse_lanes(accumulator_im0);
-                const float32x4_t rotated_re0 =
-                    vfmsq_f32(vmulq_f32(natural_re0, rotation_re0), natural_im0, rotation_im0);
-                const float32x4_t rotated_re1 =
-                    vfmsq_f32(vmulq_f32(natural_re1, rotation_re1), natural_im1, rotation_im1);
-                const float32x4_t rotated_im0 =
-                    vfmaq_f32(vmulq_f32(natural_im0, rotation_re0), natural_re0, rotation_im0);
-                const float32x4_t rotated_im1 =
-                    vfmaq_f32(vmulq_f32(natural_im1, rotation_re1), natural_re1, rotation_im1);
-                vst1q_f32(fft_re.data(), rotated_re0);
-                vst1q_f32(fft_re.data() + 4U, rotated_re1);
-                vst1q_f32(fft_im.data(), rotated_im0);
-                vst1q_f32(fft_im.data() + 4U, rotated_im1);
-
-                Ifft_generic(fft_re.data(), fft_im.data(), bins);
-                const auto logical_bins = plan.logical_bins();
-                for (std::size_t output = 0U; output < selected_count; ++output) {
-                    const std::int32_t logical_bin = logical_bins[output];
-                    const std::size_t fft_bin = static_cast<std::size_t>(logical_bin < 0 ? logical_bin + 8 : logical_bin);
-                    pfb_store_output(block.outputs[output], produced,
-                                     pfb_apply_post_phase(plan, output, post_phase,
-                                                          fft_re[fft_bin], fft_im[fft_bin]));
-                }
-            }
-            ++produced;
-            post_phase = post_phase + 1U == phase_period ? 0U : post_phase + 1U;
+template <std::size_t Bins, std::size_t HopCount, bool RowIlp = false>
+void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& block,
+                   const std::size_t* const cursors, const std::size_t* const phases,
+                   const std::size_t output_index) noexcept {
+    static_assert(Bins % 4U == 0U);
+    constexpr std::size_t width = 4U;
+    constexpr std::size_t chunk_count = Bins / width;
+    const std::size_t rows = PfbChannelizerAccess::rows(data);
+    const std::size_t history_size = PfbChannelizerAccess::history_size(data);
+    const float* coefficients = PfbChannelizerAccess::reversed_coefficients(data);
+    const float* history_i = PfbChannelizerAccess::history_i(data);
+    const float* history_q = PfbChannelizerAccess::history_q(data);
+    const float* rotations_re = PfbChannelizerAccess::branch_rotation_re(data);
+    const float* rotations_im = PfbChannelizerAccess::branch_rotation_im(data);
+    const bool direct = data.selected_output_count() == 1U;
+    const float* weights_re = PfbChannelizerAccess::selected_transform_re(data);
+    const float* weights_im = PfbChannelizerAccess::selected_transform_im(data);
+    alignas(16) std::array<std::array<float, Bins>, 4U> values_re;
+    alignas(16) std::array<std::array<float, Bins>, 4U> values_im;
+    float32x4_t direct_re[4U];
+    float32x4_t direct_im[4U];
+    if (direct) {
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+            direct_re[hop] = vdupq_n_f32(0.0f);
+            direct_im[hop] = vdupq_n_f32(0.0f);
         }
-
-        cursor = (cursor + 1U) & history_mask;
-        decimation_phase = decimation_phase + 1U == decimation ? 0U : decimation_phase + 1U;
     }
 
-    PfbChannelizerAccess::set_cursor(state, cursor);
-    PfbChannelizerAccess::set_decimation_phase(state, decimation_phase);
-    PfbChannelizerAccess::set_post_phase(state, post_phase);
-    return produced;
+    for (std::size_t destination_chunk = 0U; destination_chunk < chunk_count; ++destination_chunk) {
+        const std::size_t source_chunk = chunk_count - 1U - destination_chunk;
+        constexpr std::size_t chain_count = RowIlp ? 4U : 1U;
+        float32x4_t accumulator_re[4U][4U];
+        float32x4_t accumulator_im[4U][4U];
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+            for (std::size_t chain = 0U; chain < chain_count; ++chain) {
+                accumulator_re[hop][chain] = vdupq_n_f32(0.0f);
+                accumulator_im[hop][chain] = vdupq_n_f32(0.0f);
+            }
+        }
+        for (std::size_t row = 0U; row < rows; ++row) {
+            const std::size_t chunk_offset = source_chunk * width;
+            const float32x4_t coefficient = vld1q_f32(coefficients + row * Bins + chunk_offset);
+            const std::size_t row_offset = history_size - row * Bins - (Bins - 1U) + chunk_offset;
+            const std::size_t chain = RowIlp ? row % chain_count : 0U;
+            for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+                const std::size_t first_sample = cursors[hop] + row_offset;
+                accumulator_re[hop][chain] = vfmaq_f32(
+                    accumulator_re[hop][chain], vld1q_f32(history_i + first_sample), coefficient);
+                accumulator_im[hop][chain] = vfmaq_f32(
+                    accumulator_im[hop][chain], vld1q_f32(history_q + first_sample), coefficient);
+            }
+        }
+
+        const std::size_t destination_offset = destination_chunk * width;
+        const float32x4_t rotation_re = vld1q_f32(rotations_re + destination_offset);
+        const float32x4_t rotation_im = vld1q_f32(rotations_im + destination_offset);
+        const float32x4_t weight_re = direct ? vld1q_f32(weights_re + destination_offset)
+                                             : vdupq_n_f32(0.0f);
+        const float32x4_t weight_im = direct ? vld1q_f32(weights_im + destination_offset)
+                                             : vdupq_n_f32(0.0f);
+        for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+            float32x4_t accumulated_re = accumulator_re[hop][0U];
+            float32x4_t accumulated_im = accumulator_im[hop][0U];
+            if constexpr (RowIlp) {
+                accumulated_re = vaddq_f32(
+                    vaddq_f32(accumulated_re, accumulator_re[hop][1U]),
+                    vaddq_f32(accumulator_re[hop][2U], accumulator_re[hop][3U]));
+                accumulated_im = vaddq_f32(
+                    vaddq_f32(accumulated_im, accumulator_im[hop][1U]),
+                    vaddq_f32(accumulator_im[hop][2U], accumulator_im[hop][3U]));
+            }
+            const float32x4_t natural_re = reverse_lanes(accumulated_re);
+            const float32x4_t natural_im = reverse_lanes(accumulated_im);
+            const float32x4_t transformed_re =
+                vfmsq_f32(vmulq_f32(natural_re, rotation_re), natural_im, rotation_im);
+            const float32x4_t transformed_im =
+                vfmaq_f32(vmulq_f32(natural_im, rotation_re), natural_re, rotation_im);
+            if (direct) {
+                direct_re[hop] = vfmaq_f32(direct_re[hop], transformed_re, weight_re);
+                direct_re[hop] = vfmsq_f32(direct_re[hop], transformed_im, weight_im);
+                direct_im[hop] = vfmaq_f32(direct_im[hop], transformed_re, weight_im);
+                direct_im[hop] = vfmaq_f32(direct_im[hop], transformed_im, weight_re);
+            } else {
+                vst1q_f32(values_re[hop].data() + destination_offset, transformed_re);
+                vst1q_f32(values_im[hop].data() + destination_offset, transformed_im);
+            }
+        }
+    }
+
+    for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+        if (direct) {
+            pfb_store_output(block.outputs[0], output_index + hop,
+                             pfb_apply_post_phase(data, 0U, phases[hop],
+                                                  horizontal_sum(direct_re[hop]),
+                                                  horizontal_sum(direct_im[hop])));
+            continue;
+        }
+        pfb_emit_outputs(data, block, output_index + hop, phases[hop],
+                         values_re[hop].data(), values_im[hop].data(),
+                         [](float* const real, float* const imag, const std::size_t count) noexcept {
+                             Ifft_generic(real, imag, count);
+                         });
+    }
+}
+
+template <std::size_t Bins>
+[[nodiscard]] std::size_t process(PfbChannelizerData& data,
+                                  const PfbChannelizerBlock& block) noexcept {
+    const std::size_t filter_span = PfbChannelizerAccess::rows(data) * Bins;
+    const std::size_t history_size = PfbChannelizerAccess::history_size(data);
+    const std::size_t batch_limit = std::min<std::size_t>(
+        4U, 1U + (history_size - filter_span) / data.decimation());
+    return pfb_process_streaming(
+        data, block, batch_limit,
+        [&](const std::size_t* const cursors, const std::size_t* const phases,
+            const std::size_t hop_count, const std::size_t output_index) noexcept {
+            if (hop_count == 1U) {
+                process_batch<Bins, 1U, true>(data, block, cursors, phases, output_index);
+                return;
+            }
+            switch (hop_count) {
+            case 1U:
+                process_batch<Bins, 1U>(data, block, cursors, phases, output_index);
+                break;
+            case 2U:
+                process_batch<Bins, 2U>(data, block, cursors, phases, output_index);
+                break;
+            case 3U:
+                process_batch<Bins, 3U>(data, block, cursors, phases, output_index);
+                break;
+            case 4U:
+                process_batch<Bins, 4U>(data, block, cursors, phases, output_index);
+                break;
+            default:
+                break;
+            }
+        });
+}
+
+} // namespace
+
+std::size_t PfbChannelizer_neon(PfbChannelizerData& data,
+                                const PfbChannelizerBlock& block) noexcept {
+    switch (data.bin_count()) {
+    case 4U:
+        return process<4U>(data, block);
+    case 8U:
+        return process<8U>(data, block);
+    case 16U:
+        return process<16U>(data, block);
+    case 32U:
+        return process<32U>(data, block);
+    default:
+        return PfbChannelizer_generic(data, block);
+    }
 }
 
 } // namespace uni::simd::detail
 #else
 namespace uni::simd::detail {
 
-std::size_t PfbChannelizer_neon(PfbChannelizerData& data, const PfbChannelizerBlock& block) noexcept {
+std::size_t PfbChannelizer_neon(PfbChannelizerData& data,
+                                const PfbChannelizerBlock& block) noexcept {
     return PfbChannelizer_generic(data, block);
 }
 

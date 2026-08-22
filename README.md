@@ -112,6 +112,15 @@ unique logical bins in `[-M/2, M/2-1]`. Taps are newest-first, initial history i
 zero, and the first output is emitted for input sample zero. There is no
 end-of-stream flush operation.
 
+AVX2/FMA and AArch64 NEON PFB implementations cover every supported bin count,
+decimation, tap count, grid offset, and output selection. SIMD code is specialized
+only by vector/FFT width; it has no hard-coded coefficient or channel profile.
+Up to four output hops share coefficient loads when the mirrored history ring has
+enough overwrite headroom. A single selected channel uses a direct SIMD transform;
+multiple channels use the corresponding IFFT path. Optimized FIR reductions may
+round differently for different block fragmentation; deterministic math mode uses
+the generic path when bit-stable execution is required.
+
 For bin `b`, grid offset `delta` (`0` or `0.5`), decimation `D`, and hop `h`,
 the channelizer computes the following unscaled output, with samples before the
 start of the stream treated as zero:

@@ -57,31 +57,10 @@ std::size_t PfbChannelizer_generic(PfbChannelizerData& data, const PfbChannelize
                     fft_im[branch] = accumulator_re * rotation_im[branch] + accumulator_im * rotation_re[branch];
                 }
 
-                if (selected_count == 1U) {
-                    const float* transform_re = PfbChannelizerAccess::selected_transform_re(plan);
-                    const float* transform_im = PfbChannelizerAccess::selected_transform_im(plan);
-                    float output_re = 0.0f;
-                    float output_im = 0.0f;
-                    for (std::size_t branch = 0U; branch < bins; ++branch) {
-                        output_re += fft_re[branch] * transform_re[branch] -
-                                     fft_im[branch] * transform_im[branch];
-                        output_im += fft_re[branch] * transform_im[branch] +
-                                     fft_im[branch] * transform_re[branch];
-                    }
-                    pfb_store_output(block.outputs[0], produced,
-                                     pfb_apply_post_phase(plan, 0U, post_phase, output_re, output_im));
-                } else {
-                    Ifft_generic(fft_re.data(), fft_im.data(), bins);
-                    const auto logical_bins = plan.logical_bins();
-                    for (std::size_t output = 0U; output < selected_count; ++output) {
-                        const std::int32_t logical_bin = logical_bins[output];
-                        const std::size_t fft_bin = static_cast<std::size_t>(
-                            logical_bin < 0 ? logical_bin + static_cast<std::int32_t>(bins) : logical_bin);
-                        pfb_store_output(block.outputs[output], produced,
-                                         pfb_apply_post_phase(plan, output, post_phase,
-                                                              fft_re[fft_bin], fft_im[fft_bin]));
-                    }
-                }
+                pfb_emit_outputs(plan, block, produced, post_phase, fft_re.data(), fft_im.data(),
+                                 [](float* const real, float* const imag, const std::size_t count) noexcept {
+                                     Ifft_generic(real, imag, count);
+                                 });
             }
             ++produced;
             post_phase = post_phase + 1U == phase_period ? 0U : post_phase + 1U;

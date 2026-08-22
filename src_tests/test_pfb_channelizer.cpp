@@ -278,7 +278,7 @@ void test_dispatch(const uni::simd::Context& generic) {
         assert(actual.backend == backend);
         compare_runs(reference, actual);
         const auto split = run(*context, accelerated, input, splits);
-        assert(actual.outputs == split.outputs);
+        compare_runs(actual, split);
 
         const auto compare_accelerated = [&](const uni::simd::PfbChannelizerConfig& config) {
             const auto generic_result = run(generic, config, input);
@@ -286,24 +286,66 @@ void test_dispatch(const uni::simd::Context& generic) {
             assert(accelerated_result.backend == backend);
             compare_runs(generic_result, accelerated_result);
             const auto fragmented = run(*context, config, input, splits);
-            assert(accelerated_result.outputs == fragmented.outputs);
+            compare_runs(accelerated_result, fragmented);
         };
+
+        for (const std::size_t bin_count : {4U, 8U, 16U, 32U}) {
+            const auto matrix_taps = make_taps(bin_count + 1U);
+            std::array<std::int32_t, 3U> selected{
+                -static_cast<std::int32_t>(bin_count / 2U), 0,
+                static_cast<std::int32_t>(bin_count / 2U) - 1};
+            for (std::size_t decimation = 1U; decimation <= bin_count; decimation *= 2U) {
+                for (const auto grid : {uni::simd::PfbGridOffset::integer_bins,
+                                        uni::simd::PfbGridOffset::half_bins}) {
+                    compare_accelerated({.bin_count = bin_count, .decimation = decimation,
+                                         .grid_offset = grid, .taps = matrix_taps,
+                                         .logical_bins = selected});
+                }
+            }
+
+            for (const std::size_t tap_count :
+                 std::array<std::size_t, 4U>{1U, bin_count - 1U, bin_count, bin_count + 1U}) {
+                const auto boundary_taps = make_taps(tap_count);
+                compare_accelerated({.bin_count = bin_count, .decimation = bin_count / 2U,
+                                     .grid_offset = uni::simd::PfbGridOffset::integer_bins,
+                                     .taps = boundary_taps, .logical_bins = selected});
+            }
+
+            const auto batched_taps = make_taps(4U * bin_count + 1U);
+            compare_accelerated({.bin_count = bin_count, .decimation = bin_count / 2U,
+                                 .grid_offset = uni::simd::PfbGridOffset::half_bins,
+                                 .taps = batched_taps, .logical_bins = selected});
+
+            const std::array one_short_bin{static_cast<std::int32_t>(bin_count / 2U) - 1};
+            compare_accelerated({.bin_count = bin_count, .decimation = bin_count,
+                                 .grid_offset = uni::simd::PfbGridOffset::integer_bins,
+                                 .taps = matrix_taps, .logical_bins = one_short_bin});
+
+            const auto maximum_taps = make_taps(uni::simd::pfb_channelizer_max_taps);
+            const std::array one_bin{static_cast<std::int32_t>(bin_count / 2U) - 1};
+            compare_accelerated({.bin_count = bin_count, .decimation = bin_count / 2U,
+                                 .grid_offset = uni::simd::PfbGridOffset::half_bins,
+                                 .taps = maximum_taps, .logical_bins = one_bin});
+
+            const uni::simd::PfbChannelizerConfig no_outputs{
+                .bin_count = bin_count, .decimation = bin_count,
+                .grid_offset = uni::simd::PfbGridOffset::integer_bins,
+                .taps = matrix_taps};
+            const auto discarded = run(*context, no_outputs, input, splits);
+            assert(discarded.backend == backend && discarded.outputs.empty());
+        }
+
         for (const std::size_t tap_count : {168U, 170U}) {
             const auto general_taps = make_taps(tap_count);
             compare_accelerated({.bin_count = 8U, .decimation = 4U,
                                  .grid_offset = uni::simd::PfbGridOffset::half_bins,
                                  .taps = general_taps, .logical_bins = bins});
         }
-        constexpr std::array<std::int32_t, 1U> one_bin{3};
-        const auto short_taps = make_taps(33U);
-        compare_accelerated({.bin_count = 8U, .decimation = 4U,
-                             .grid_offset = uni::simd::PfbGridOffset::integer_bins,
-                             .taps = short_taps, .logical_bins = one_bin});
         constexpr std::array<std::int32_t, 8U> all_bins{-4, -3, -2, -1, 0, 1, 2, 3};
-        const auto maximum_taps = make_taps(uni::simd::pfb_channelizer_max_taps);
+        const auto maximum_eight_taps = make_taps(uni::simd::pfb_channelizer_max_taps);
         compare_accelerated({.bin_count = 8U, .decimation = 4U,
                              .grid_offset = uni::simd::PfbGridOffset::integer_bins,
-                             .taps = maximum_taps, .logical_bins = all_bins});
+                             .taps = maximum_eight_taps, .logical_bins = all_bins});
 
         auto reset_channelizer = context->make_pfb_channelizer(accelerated);
         assert(reset_channelizer.has_value());
@@ -327,13 +369,6 @@ void test_dispatch(const uni::simd::Context& generic) {
         assert(reset_channelizer->process(second_block) == count);
         assert(first_outputs == second_outputs);
 
-        constexpr std::array<std::int32_t, 2U> fallback_bins{-2, 3};
-        const uni::simd::PfbChannelizerConfig fallback{
-            .bin_count = 16U, .decimation = 8U, .grid_offset = uni::simd::PfbGridOffset::integer_bins,
-            .taps = taps, .logical_bins = fallback_bins};
-        const auto fallback_actual = run(*context, fallback, input);
-        assert(fallback_actual.backend == uni::simd::Backend::generic);
-        compare_runs(run(generic, fallback, input), fallback_actual);
     }
 
     const auto deterministic = uni::simd::create_context({.math_mode = uni::simd::MathMode::deterministic});

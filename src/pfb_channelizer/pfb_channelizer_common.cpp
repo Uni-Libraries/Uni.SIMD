@@ -60,10 +60,6 @@ bool PfbChannelizer_supports_all(const PfbChannelizerData&) noexcept {
     return true;
 }
 
-bool PfbChannelizer_supports_m8_d4(const PfbChannelizerData& data) noexcept {
-    return data.bins == 8U && data.decimation_value == 4U;
-}
-
 std::expected<std::unique_ptr<PfbChannelizerData>, Result>
 make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChannelizerFn candidate,
                           const PfbChannelizerSupportFn supports, const Backend backend) noexcept {
@@ -98,6 +94,13 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
         data->history_size = next_power_of_two(data->rows * config.bin_count);
         data->offset = config.grid_offset;
         data->selected_bins.assign(config.logical_bins.begin(), config.logical_bins.end());
+        data->selected_fft_bins.resize(data->selected_bins.size());
+        for (std::size_t output = 0U; output < data->selected_bins.size(); ++output) {
+            data->selected_fft_bins[output] = static_cast<std::size_t>(
+                data->selected_bins[output] < 0
+                    ? data->selected_bins[output] + static_cast<std::int32_t>(data->bins)
+                    : data->selected_bins[output]);
+        }
         data->reversed_coefficients.resize(data->rows * data->bins);
 
         const bool half_grid = config.grid_offset == PfbGridOffset::half_bins;

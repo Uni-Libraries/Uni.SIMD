@@ -93,8 +93,9 @@ enum class BackendPolicy : std::uint8_t {
 
 enum class PfbBenchmarkProfile : std::uint8_t {
     single_output,
-    target_169,
-    general_170,
+    four_outputs,
+    four_169,
+    four_170,
     short_33,
 };
 
@@ -161,14 +162,18 @@ constexpr std::array kKernelDescriptions{
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
                       BackendPolicy::dispatched, 4U},
-    KernelDescription{"pfb_cf32_8_target169", "eight-bin target profile: 169 taps, four half-grid outputs",
+    KernelDescription{"pfb_cf32_4_four", "four-bin PFB with all four integer-grid outputs",
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
-                      BackendPolicy::dispatched, 8U, true, PfbBenchmarkProfile::target_169},
-    KernelDescription{"pfb_cf32_8_general170", "eight-bin general path: 170 taps, four half-grid outputs",
+                      BackendPolicy::dispatched, 4U, true, PfbBenchmarkProfile::four_outputs},
+    KernelDescription{"pfb_cf32_8_four169", "eight-bin PFB: 169 taps, four half-grid outputs",
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
-                      BackendPolicy::dispatched, 8U, true, PfbBenchmarkProfile::general_170},
+                      BackendPolicy::dispatched, 8U, true, PfbBenchmarkProfile::four_169},
+    KernelDescription{"pfb_cf32_8_four170", "eight-bin PFB: 170 taps, four half-grid outputs",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 8U, true, PfbBenchmarkProfile::four_170},
     KernelDescription{"pfb_cf32_8_short33", "eight-bin short filter: 33 taps, one integer-grid output",
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
@@ -177,10 +182,18 @@ constexpr std::array kKernelDescriptions{
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
                       BackendPolicy::dispatched, 16U},
+    KernelDescription{"pfb_cf32_16_four", "sixteen-bin PFB with four integer-grid outputs",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 16U, true, PfbBenchmarkProfile::four_outputs},
     KernelDescription{"pfb_channelizer_cf32_32", "thirty-two-bin streaming PFB channelizer",
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
                       BackendPolicy::dispatched, 32U},
+    KernelDescription{"pfb_cf32_32_four", "thirty-two-bin PFB with four integer-grid outputs",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 32U, true, PfbBenchmarkProfile::four_outputs},
 };
 
 constexpr std::size_t kBufferAlignment = 128U;
@@ -634,15 +647,14 @@ public:
                 size_parameter(UNI_SIMD_PARAM_BIN_COUNT, description_.configuration),
                 size_parameter(UNI_SIMD_PARAM_DECIMATION, description_.configuration / 2U),
                 u32_parameter(UNI_SIMD_PARAM_GRID_OFFSET,
-                              description_.pfb_profile == PfbBenchmarkProfile::target_169 ||
-                                      description_.pfb_profile == PfbBenchmarkProfile::general_170
+                              description_.pfb_profile == PfbBenchmarkProfile::four_169 ||
+                                      description_.pfb_profile == PfbBenchmarkProfile::four_170
                                   ? UNI_SIMD_PFB_HALF_BINS
                                   : UNI_SIMD_PFB_INTEGER_BINS),
                 pointer_parameter(UNI_SIMD_PARAM_TAPS, taps_[lane].data()),
                 size_parameter(UNI_SIMD_PARAM_TAP_COUNT, taps_[lane].size()),
                 pointer_parameter(UNI_SIMD_PARAM_LOGICAL_BINS,
-                                  description_.pfb_profile == PfbBenchmarkProfile::target_169 ||
-                                          description_.pfb_profile == PfbBenchmarkProfile::general_170
+                                  pfb_output_count() == pfb_logical_bins_.size()
                                       ? pfb_logical_bins_.data()
                                       : description_.pfb_profile == PfbBenchmarkProfile::short_33
                                             ? &pfb_three_bin_
@@ -828,12 +840,14 @@ private:
             item_count_ -= item_count_ % decimation;
             f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
             f32_outputs_ = make_lanes<float>(lanes, item_count_ / decimation * 2U * output_count);
-            const std::size_t tap_count = description_.pfb_profile == PfbBenchmarkProfile::target_169
+            const std::size_t tap_count = description_.pfb_profile == PfbBenchmarkProfile::four_169
                                               ? 169U
-                                          : description_.pfb_profile == PfbBenchmarkProfile::general_170
+                                          : description_.pfb_profile == PfbBenchmarkProfile::four_170
                                               ? 170U
                                           : description_.pfb_profile == PfbBenchmarkProfile::short_33
                                               ? 33U
+                                          : description_.pfb_profile == PfbBenchmarkProfile::four_outputs
+                                              ? description_.configuration * 8U + 1U
                                               : description_.configuration * 8U;
             taps_ = make_lanes<float>(lanes, tap_count);
             states_.resize(lanes);
@@ -955,8 +969,9 @@ private:
     }
 
     [[nodiscard]] std::size_t pfb_output_count() const noexcept {
-        return description_.pfb_profile == PfbBenchmarkProfile::target_169 ||
-                       description_.pfb_profile == PfbBenchmarkProfile::general_170
+        return description_.pfb_profile == PfbBenchmarkProfile::four_outputs ||
+                       description_.pfb_profile == PfbBenchmarkProfile::four_169 ||
+                       description_.pfb_profile == PfbBenchmarkProfile::four_170
                    ? pfb_logical_bins_.size()
                    : 1U;
     }

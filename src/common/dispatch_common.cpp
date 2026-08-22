@@ -199,7 +199,7 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
         context.dot_ = &kernels::DotProdCF32Real_avx2fma;
         context.symmetric_dot_ = &kernels::DotProdSymmetricCF32Real_avx2fma;
         context.pfb_channelizer_ = &kernels::PfbChannelizer_avx2fma;
-        context.pfb_channelizer_support_ = &kernels::PfbChannelizer_supports_m8_d4;
+        context.pfb_channelizer_support_ = &kernels::PfbChannelizer_supports_all;
         context.ifft_ = &kernels::Ifft8_avx2_fma;
         context.ifft_support_ = &kernels::Ifft_supports_8;
         context.ifft_backend_ = Backend::avx2_fma;
@@ -212,7 +212,7 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
 #if UNI_SIMD_HAVE_NEON
     if (caps.neon && allows(requested, Backend::neon)) {
         context.pfb_channelizer_ = &kernels::PfbChannelizer_neon;
-        context.pfb_channelizer_support_ = &kernels::PfbChannelizer_supports_m8_d4;
+        context.pfb_channelizer_support_ = &kernels::PfbChannelizer_supports_all;
         context.pfb_channelizer_backend_ = Backend::neon;
     }
 #endif
