@@ -6,6 +6,7 @@
 #include "detail/simd_avx512f.h"
 #include "detail/simd_generic.h"
 #include "detail/simd_sse2.h"
+#include "detail/pfb_channelizer_internal.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -27,6 +28,9 @@
 #endif
 #ifndef UNI_SIMD_HAVE_AVX512BW
 #define UNI_SIMD_HAVE_AVX512BW 0
+#endif
+#ifndef UNI_SIMD_HAVE_NEON
+#define UNI_SIMD_HAVE_NEON 0
 #endif
 
 namespace uni::simd {
@@ -60,7 +64,7 @@ template <typename Left, typename Right>
     case Backend::avx512:
         return UNI_SIMD_HAVE_AVX512F && caps.avx512f;
     case Backend::neon:
-        return false;
+        return UNI_SIMD_HAVE_NEON && caps.neon;
     }
     return false;
 }
@@ -131,6 +135,7 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
     context.psd_ = &kernels::PowerSpectralDensityCF32F32_generic;
     context.dot_ = &kernels::DotProdCF32Real_generic;
     context.symmetric_dot_ = &kernels::DotProdSymmetricCF32Real_generic;
+    context.pfb_channelizer_ = &kernels::PfbChannelizer_generic;
     context.backends_.fill(Backend::generic);
 
 #if UNI_SIMD_HAVE_SSE2
@@ -165,7 +170,11 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
         context.psd_ = &kernels::PowerSpectralDensityCF32F32_avx2;
         context.dot_ = &kernels::DotProdCF32Real_avx2;
         context.symmetric_dot_ = &kernels::DotProdSymmetricCF32Real_avx2;
-        context.backends_.fill(Backend::avx2);
+        for (const auto kernel : {Kernel::invert_lsb, Kernel::invert_bytes, Kernel::pack_bits_lsb, Kernel::pack_bits_msb,
+                                  Kernel::unpack_bits_lsb, Kernel::unpack_bits_msb, Kernel::quantize_interleaved_cf32_u8,
+                                  Kernel::magnitude_squared_cf32, Kernel::dot_cf32_f32, Kernel::dot_symmetric_cf32_f32}) {
+            context.backends_[static_cast<std::size_t>(kernel)] = Backend::avx2;
+        }
     }
 #endif
 
@@ -173,8 +182,17 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
     if (caps.avx2 && caps.fma && allows(requested, Backend::avx2_fma)) {
         context.dot_ = &kernels::DotProdCF32Real_avx2fma;
         context.symmetric_dot_ = &kernels::DotProdSymmetricCF32Real_avx2fma;
+        context.pfb_channelizer_ = &kernels::PfbChannelizer_avx2fma;
         context.backends_[static_cast<std::size_t>(Kernel::dot_cf32_f32)] = Backend::avx2_fma;
         context.backends_[static_cast<std::size_t>(Kernel::dot_symmetric_cf32_f32)] = Backend::avx2_fma;
+        context.backends_[static_cast<std::size_t>(Kernel::pfb_channelizer_cf32)] = Backend::avx2_fma;
+    }
+#endif
+
+#if UNI_SIMD_HAVE_NEON
+    if (caps.neon && allows(requested, Backend::neon)) {
+        context.pfb_channelizer_ = &kernels::PfbChannelizer_neon;
+        context.backends_[static_cast<std::size_t>(Kernel::pfb_channelizer_cf32)] = Backend::neon;
     }
 #endif
 
@@ -425,6 +443,39 @@ std::complex<float> Context::dot_cf32_f32_unchecked(const std::complex<float>* s
 std::complex<float> Context::dot_symmetric_cf32_f32_unchecked(const std::complex<float>* src, const float* tap_pairs, const std::size_t pair_count,
                                                               const float center_tap) const noexcept {
     return symmetric_dot_(src, tap_pairs, pair_count, center_tap);
+}
+
+Result Context::pfb_channelize_cf32(const PfbChannelizerPlan& plan, PfbChannelizerState& state,
+                                    const PfbChannelizerBlockView& block, std::size_t& produced) const noexcept {
+    if (!detail::pfb_plan_is_valid(plan) || !detail::pfb_state_is_valid(plan, state)) {
+        return Result::invalid_argument;
+    }
+
+    const std::size_t expected_count = detail::pfb_output_count_unchecked(plan, state, block.input.size());
+    const std::size_t output_count = plan.selected_output_count();
+    for (std::size_t output = 0U; output < output_count; ++output) {
+        if (block.outputs[output].size() < expected_count) {
+            return Result::invalid_size;
+        }
+        const auto active_output = block.outputs[output].first(expected_count);
+        if (overlaps(active_output, block.input)) {
+            return Result::overlapping_buffers;
+        }
+        for (std::size_t previous = 0U; previous < output; ++previous) {
+            if (overlaps(active_output, block.outputs[previous].first(expected_count))) {
+                return Result::overlapping_buffers;
+            }
+        }
+    }
+
+    const std::size_t actual_count = pfb_channelizer_(plan, state, block);
+    produced = actual_count;
+    return Result::success;
+}
+
+std::size_t Context::pfb_channelize_cf32_unchecked(const PfbChannelizerPlan& plan, PfbChannelizerState& state,
+                                                    const PfbChannelizerBlockView& block) const noexcept {
+    return pfb_channelizer_(plan, state, block);
 }
 
 std::string_view backend_name(const Backend backend) noexcept {

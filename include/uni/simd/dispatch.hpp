@@ -10,6 +10,7 @@
 
 #include <uni/simd/capabilities.hpp>
 #include <uni/simd/export.hpp>
+#include <uni/simd/pfb_channelizer.hpp>
 #include <uni/simd/result.hpp>
 
 namespace uni::simd {
@@ -42,6 +43,7 @@ enum class Kernel : std::uint8_t {
     magnitude_squared_cf32,
     dot_cf32_f32,
     dot_symmetric_cf32_f32,
+    pfb_channelizer_cf32,
     count,
 };
 
@@ -81,11 +83,17 @@ public:
                                      std::span<const float> taps) const noexcept;
     [[nodiscard]] Result dot_symmetric_cf32_f32(std::complex<float>& dst, std::span<const std::complex<float>> src,
                                                std::span<const float> tap_pairs, float center_tap) const noexcept;
+    [[nodiscard]] Result pfb_channelize_cf32(const PfbChannelizerPlan& plan, PfbChannelizerState& state,
+                                             const PfbChannelizerBlockView& block,
+                                             std::size_t& produced) const noexcept;
 
     [[nodiscard]] std::complex<float> dot_cf32_f32_unchecked(const std::complex<float>* src, const float* taps,
                                                             std::size_t count) const noexcept;
     [[nodiscard]] std::complex<float> dot_symmetric_cf32_f32_unchecked(const std::complex<float>* src, const float* tap_pairs,
                                                                       std::size_t pair_count, float center_tap) const noexcept;
+    [[nodiscard]] std::size_t pfb_channelize_cf32_unchecked(const PfbChannelizerPlan& plan,
+                                                            PfbChannelizerState& state,
+                                                            const PfbChannelizerBlockView& block) const noexcept;
 
 private:
     using ByteFn = void (*)(void*, const void*, std::size_t);
@@ -94,6 +102,8 @@ private:
     using PsdFn = void (*)(float*, const std::complex<float>*, std::size_t, float, float) noexcept;
     using DotFn = std::complex<float> (*)(const void*, const float*, std::size_t) noexcept;
     using SymmetricDotFn = std::complex<float> (*)(const void*, const float*, std::size_t, float) noexcept;
+    using PfbChannelizerFn = std::size_t (*)(const PfbChannelizerPlan&, PfbChannelizerState&,
+                                             const PfbChannelizerBlockView&) noexcept;
 
     ByteFn invert_lsb_ = nullptr;
     ByteFn invert_bytes_ = nullptr;
@@ -106,6 +116,7 @@ private:
     PsdFn psd_ = nullptr;
     DotFn dot_ = nullptr;
     SymmetricDotFn symmetric_dot_ = nullptr;
+    PfbChannelizerFn pfb_channelizer_ = nullptr;
     std::array<Backend, static_cast<std::size_t>(Kernel::count)> backends_{};
     MathMode math_mode_ = MathMode::fast;
 
