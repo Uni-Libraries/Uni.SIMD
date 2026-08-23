@@ -13,7 +13,6 @@
 #include <mutex>
 #include <new>
 #include <optional>
-#include <shared_mutex>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -24,8 +23,8 @@ static_assert(static_cast<unsigned>(uni::simd::Backend::neon) == UNI_SIMD_BACKEN
 namespace {
 
 struct Runtime final {
-    std::shared_mutex mutex;
-    bool initialized = false;
+    std::mutex mutex;
+    std::atomic_bool initialized{false};
     std::atomic_size_t kernel_count{0U};
 };
 
@@ -103,7 +102,6 @@ struct uni_simd_kernel_t final {
     uni_simd_kernel_e id;
     ParsedParams params;
     std::optional<uni::simd::PfbChannelizer> pfb;
-    std::mutex mutex;
 };
 
 namespace {
@@ -640,8 +638,8 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
 uni_simd_result_e UNI_SIMD_CALL uni_simd_initialize(void) {
     try {
         auto& active = runtime();
-        const std::unique_lock lock{active.mutex};
-        active.initialized = true;
+        const std::lock_guard lock{active.mutex};
+        active.initialized.store(true, std::memory_order_release);
         return UNI_SIMD_RESULT_SUCCESS;
     } catch (...) {
         return UNI_SIMD_RESULT_INVALID_STATE;
@@ -651,11 +649,11 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_initialize(void) {
 uni_simd_result_e UNI_SIMD_CALL uni_simd_finalize(void) {
     try {
         auto& active = runtime();
-        const std::unique_lock lock{active.mutex};
+        const std::lock_guard lock{active.mutex};
         if (active.kernel_count.load(std::memory_order_relaxed) != 0U) {
             return UNI_SIMD_RESULT_INVALID_STATE;
         }
-        active.initialized = false;
+        active.initialized.store(false, std::memory_order_release);
         return UNI_SIMD_RESULT_SUCCESS;
     } catch (...) {
         return UNI_SIMD_RESULT_INVALID_STATE;
@@ -665,8 +663,8 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_finalize(void) {
 uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(const uni_simd_kernel_e kernel) {
     try {
         auto& active = runtime();
-        const std::shared_lock lock{active.mutex};
-        if (!active.initialized || kernel <= UNI_SIMD_KERNEL_UNKNOWN ||
+        const std::lock_guard lock{active.mutex};
+        if (!active.initialized.load(std::memory_order_relaxed) || kernel <= UNI_SIMD_KERNEL_UNKNOWN ||
             kernel > UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
             return nullptr;
         }
@@ -683,15 +681,11 @@ uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(const uni_simd_kernel_e 
 uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set(uni_simd_kernel_t* const kernel,
                                                            const uni_simd_param_t param) {
     try {
-        auto& active = runtime();
-        const std::shared_lock lock{active.mutex};
-        if (!active.initialized) {
-            return UNI_SIMD_RESULT_NOT_INITIALIZED;
-        }
         if (kernel == nullptr) {
-            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+            return runtime().initialized.load(std::memory_order_acquire)
+                       ? UNI_SIMD_RESULT_INVALID_ARGUMENT
+                       : UNI_SIMD_RESULT_NOT_INITIALIZED;
         }
-        const std::lock_guard kernel_lock{kernel->mutex};
         ParsedParams pending = kernel->params;
         const auto result = set_parameter(kernel->id, kernel->pfb.has_value(), pending,
                                           param.id, param.value);
@@ -708,15 +702,12 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set_many(
     uni_simd_kernel_t* const kernel, uni_simd_param_t* const params,
     const std::size_t param_count) {
     try {
-        auto& active = runtime();
-        const std::shared_lock lock{active.mutex};
-        if (!active.initialized) {
-            return UNI_SIMD_RESULT_NOT_INITIALIZED;
-        }
         if (kernel == nullptr || (param_count != 0U && params == nullptr)) {
+            if (kernel == nullptr && !runtime().initialized.load(std::memory_order_acquire)) {
+                return UNI_SIMD_RESULT_NOT_INITIALIZED;
+            }
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
-        const std::lock_guard kernel_lock{kernel->mutex};
         ParsedParams pending = kernel->params;
         for (std::size_t index = 0U; index < param_count; ++index) {
             const auto result = set_parameter(kernel->id, kernel->pfb.has_value(), pending,
@@ -734,15 +725,11 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set_many(
 
 uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(uni_simd_kernel_t* const kernel) {
     try {
-        auto& active = runtime();
-        const std::shared_lock lock{active.mutex};
-        if (!active.initialized) {
-            return UNI_SIMD_RESULT_NOT_INITIALIZED;
-        }
         if (kernel == nullptr) {
-            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+            return runtime().initialized.load(std::memory_order_acquire)
+                       ? UNI_SIMD_RESULT_INVALID_ARGUMENT
+                       : UNI_SIMD_RESULT_NOT_INITIALIZED;
         }
-        const std::lock_guard kernel_lock{kernel->mutex};
         if (kernel->id != UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
@@ -762,7 +749,7 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kernel_t* const ke
     }
     try {
         auto& active = runtime();
-        const std::unique_lock lock{active.mutex};
+        const std::lock_guard lock{active.mutex};
         delete kernel;
         active.kernel_count.fetch_sub(1U, std::memory_order_relaxed);
         return UNI_SIMD_RESULT_SUCCESS;
@@ -772,17 +759,13 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kernel_t* const ke
 }
 
 uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(uni_simd_kernel_t* const kernel,
-                                                        const void* const input, void* const output) {
+                                                         const void* const input, void* const output) {
     try {
-        auto& active = runtime();
-        const std::shared_lock lock{active.mutex};
-        if (!active.initialized) {
-            return UNI_SIMD_RESULT_NOT_INITIALIZED;
-        }
         if (kernel == nullptr) {
-            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+            return runtime().initialized.load(std::memory_order_acquire)
+                       ? UNI_SIMD_RESULT_INVALID_ARGUMENT
+                       : UNI_SIMD_RESULT_NOT_INITIALIZED;
         }
-        const std::lock_guard kernel_lock{kernel->mutex};
         struct CommandReset final {
             ParsedParams& params;
             ~CommandReset() {

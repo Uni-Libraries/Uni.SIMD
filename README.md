@@ -72,8 +72,8 @@ element counts. Complex buffers use flat `float` storage in
 
 Parameters are stored in a kernel instance with `uni_simd_kernel_param_set()`.
 Each `uni_simd_param_t` contains an ID and value; the ID determines which value
-field is used. `uni_simd_kernel_param_set_many()` atomically applies a batch under
-one lock and leaves the previous configuration unchanged if any item is invalid.
+field is used. `uni_simd_kernel_param_set_many()` atomically applies a batch and
+leaves the previous configuration unchanged if any item is invalid.
 Common optional parameters select a backend and math mode or report the resolved
 backend through `value.pointer`. Kernel-specific parameters carry values such as
 scale, taps, normalization, and PFB configuration.
@@ -157,8 +157,9 @@ Input and output use interleaved `{real, imaginary}` floats and are processed
 directly without internal block-sized conversion buffers. Configuration and
 coefficient tables are copied when streaming state is created; steady-state
 processing does not allocate. A failed processing call does not reset or advance
-state. A PFB kernel is single-stream and must not be used concurrently, while
-separate kernel instances may run concurrently.
+state. Kernel instances have no internal operation lock: execute, parameter
+updates, reset, and free must not overlap for the same instance. Create another
+instance for concurrent work; separate instances may run concurrently.
 
 ## Benchmarks
 

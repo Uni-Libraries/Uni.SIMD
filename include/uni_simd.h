@@ -45,16 +45,20 @@ UNI_SIMD_API uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(uni_simd_ke
  * Sets or replaces one kernel parameter. The value field is inferred from the
  * parameter ID. Borrowed pointers must remain valid while the library may
  * access them. PFB configuration arrays are copied when streaming state is
- * created.
+ * created. The caller must serialize this call with every other operation on
+ * the same kernel instance.
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set(
     uni_simd_kernel_t* kernel, uni_simd_param_t param);
 
-/** Atomically applies a parameter batch under one kernel lock. */
+/** Atomically applies a parameter batch. Calls on one instance require caller serialization. */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set_many(
     uni_simd_kernel_t* kernel, uni_simd_param_t* params, size_t param_count);
 
-/** Releases a kernel instance. Passing NULL is a successful no-op. */
+/**
+ * Releases a kernel instance. Passing NULL is a successful no-op. The caller
+ * must ensure no operation using this instance is running concurrently.
+ */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kernel_t* kernel);
 
 /**
@@ -92,8 +96,9 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kerne
  * Buffers are borrowed for the duration of the call and require their element
  * type's natural alignment, but no additional SIMD alignment. Except for COPY_U8 and
  * documented exact in-place kernels, active input and output ranges must not
- * overlap. Operations on one kernel instance are serialized; separate instances
- * may execute concurrently.
+ * overlap. Operations on one kernel instance are not internally synchronized:
+ * the caller must not invoke execute, parameter updates, reset, or free
+ * concurrently for the same instance. Separate instances may execute concurrently.
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(
     uni_simd_kernel_t* kernel, const void* input, void* output);
