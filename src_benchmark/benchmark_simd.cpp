@@ -544,27 +544,33 @@ template <typename Value>
     return lanes;
 }
 
-[[nodiscard]] uni_simd_param_t u32_parameter(const uni_simd_param_id_e id, const std::uint32_t value) noexcept {
-    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_U32};
-    parameter.value.u32 = value;
+[[nodiscard]] uni_simd_param_val u32_parameter(const std::uint32_t value) noexcept {
+    uni_simd_param_val parameter{};
+    parameter.u32 = value;
     return parameter;
 }
 
-[[nodiscard]] uni_simd_param_t size_parameter(const uni_simd_param_id_e id, const std::size_t value) noexcept {
-    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_SIZE};
-    parameter.value.size = value;
+[[nodiscard]] uni_simd_param_val size_parameter(const std::size_t value) noexcept {
+    uni_simd_param_val parameter{};
+    parameter.size = value;
     return parameter;
 }
 
-[[nodiscard]] uni_simd_param_t float_parameter(const uni_simd_param_id_e id, const float value) noexcept {
-    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_FLOAT32};
-    parameter.value.f32 = value;
+[[nodiscard]] uni_simd_param_val float_parameter(const float value) noexcept {
+    uni_simd_param_val parameter{};
+    parameter.f32 = value;
     return parameter;
 }
 
-[[nodiscard]] uni_simd_param_t pointer_parameter(const uni_simd_param_id_e id, const void* const value) noexcept {
-    uni_simd_param_t parameter{.param_id = id, .param_type = UNI_SIMD_PARAM_TYPE_CONST_POINTER};
-    parameter.value.const_pointer = value;
+[[nodiscard]] uni_simd_param_val const_pointer_parameter(const void* const value) noexcept {
+    uni_simd_param_val parameter{};
+    parameter.const_pointer = value;
+    return parameter;
+}
+
+[[nodiscard]] uni_simd_param_val pointer_parameter(void* const value) noexcept {
+    uni_simd_param_val parameter{};
+    parameter.pointer = value;
     return parameter;
 }
 
@@ -575,17 +581,17 @@ template <typename Value>
 struct Invocation {
     uni_simd_const_buffer_t input{};
     uni_simd_buffer_t output{};
-    std::array<uni_simd_param_t, 8U> parameters{};
-    std::size_t parameter_count = 0U;
+    uni_simd_backend_e resolved_backend = UNI_SIMD_BACKEND_AUTOMATIC;
+    std::size_t output_count = 0U;
 };
 
-struct StateDeleter {
-    void operator()(uni_simd_state_t* const state) const noexcept {
-        uni_simd_state_free(state);
+struct KernelDeleter {
+    void operator()(uni_simd_kernel_t* const kernel) const noexcept {
+        static_cast<void>(uni_simd_kernel_free(kernel));
     }
 };
 
-using StatePtr = std::unique_ptr<uni_simd_state_t, StateDeleter>;
+using KernelPtr = std::unique_ptr<uni_simd_kernel_t, KernelDeleter>;
 
 class Workload final {
 public:
@@ -599,78 +605,100 @@ public:
     }
 
     ~Workload() {
-        free_states();
+        free_kernels();
     }
 
     [[nodiscard]] uni_simd_result_e configure(const uni_simd_backend_e backend) {
-        free_states();
+        free_kernels();
+        kernels_.resize(invocations_.size());
         if (description_.shape == WorkloadShape::ifft) {
             fill_ifft_inputs();
         }
         for (std::size_t lane = 0U; lane < invocations_.size(); ++lane) {
             auto& invocation = invocations_[lane];
-            std::size_t count = 0U;
-            if (description_.shape == WorkloadShape::pfb) {
-                invocation.parameters[count++] =
-                    u32_parameter(UNI_SIMD_PARAM_RESOLVED_BACKEND, UNI_SIMD_BACKEND_AUTOMATIC);
-                invocation.parameters[count++] = size_parameter(UNI_SIMD_PARAM_OUTPUT_COUNT, 0U);
-                invocation.parameter_count = count;
-                continue;
+            invocation.resolved_backend = UNI_SIMD_BACKEND_AUTOMATIC;
+            invocation.output_count = 0U;
+            kernels_[lane].reset(uni_simd_kernel_create(description_.kernel));
+            if (!kernels_[lane]) {
+                free_kernels();
+                return UNI_SIMD_RESULT_OUT_OF_MEMORY;
             }
-            invocation.parameters[count++] = u32_parameter(UNI_SIMD_PARAM_BACKEND, backend);
-            invocation.parameters[count++] = u32_parameter(UNI_SIMD_PARAM_RESOLVED_BACKEND, UNI_SIMD_BACKEND_AUTOMATIC);
-            if (has_requirement(description_, requirement_scale)) {
-                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_SCALE, -7.0f);
-            }
-            if (has_requirement(description_, requirement_normalization)) {
-                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_NORMALIZATION_FACTOR, 3.0f);
-            }
-            if (has_requirement(description_, requirement_rbw)) {
-                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_RBW_HZ, 2.0f);
-            }
-            if (has_requirement(description_, requirement_taps) && description_.shape != WorkloadShape::pfb) {
-                invocation.parameters[count++] = pointer_parameter(UNI_SIMD_PARAM_TAPS, taps_[lane].data());
-                invocation.parameters[count++] = size_parameter(UNI_SIMD_PARAM_TAP_COUNT, taps_[lane].size());
-            }
-            if (has_requirement(description_, requirement_center_tap)) {
-                invocation.parameters[count++] = float_parameter(UNI_SIMD_PARAM_CENTER_TAP, 0.25f);
-            }
-            invocation.parameter_count = count;
-        }
-        if (description_.shape != WorkloadShape::pfb) {
-            return UNI_SIMD_RESULT_SUCCESS;
-        }
-        for (std::size_t lane = 0U; lane < invocations_.size(); ++lane) {
-            std::array<uni_simd_param_t, 9U> creation{
-                u32_parameter(UNI_SIMD_PARAM_BACKEND, backend),
-                u32_parameter(UNI_SIMD_PARAM_RESOLVED_BACKEND, UNI_SIMD_BACKEND_AUTOMATIC),
-                size_parameter(UNI_SIMD_PARAM_BIN_COUNT, description_.configuration),
-                size_parameter(UNI_SIMD_PARAM_DECIMATION, description_.configuration / 2U),
-                u32_parameter(UNI_SIMD_PARAM_GRID_OFFSET,
-                              description_.pfb_profile == PfbBenchmarkProfile::four_169 ||
-                                      description_.pfb_profile == PfbBenchmarkProfile::four_170
-                                  ? UNI_SIMD_PFB_HALF_BINS
-                                  : UNI_SIMD_PFB_INTEGER_BINS),
-                pointer_parameter(UNI_SIMD_PARAM_TAPS, taps_[lane].data()),
-                size_parameter(UNI_SIMD_PARAM_TAP_COUNT, taps_[lane].size()),
-                pointer_parameter(UNI_SIMD_PARAM_LOGICAL_BINS,
-                                  pfb_output_count() == pfb_logical_bins_.size()
-                                      ? pfb_logical_bins_.data()
-                                      : description_.pfb_profile == PfbBenchmarkProfile::short_33
-                                            ? &pfb_three_bin_
-                                            : &pfb_zero_bin_),
-                size_parameter(UNI_SIMD_PARAM_LOGICAL_BIN_COUNT, pfb_output_count()),
+            auto set = [&](const uni_simd_param_id id, const uni_simd_param_val value) {
+                return uni_simd_kernel_param_set(kernels_[lane].get(), id, value);
             };
-            uni_simd_state_t* state = nullptr;
-            const uni_simd_result_e result = uni_simd_execute(
-                description_.kernel, nullptr, nullptr, creation.data(), creation.size(), &state);
-            if (result != UNI_SIMD_RESULT_SUCCESS) {
-                uni_simd_state_free(state);
-                free_states();
+            if (auto result = set(UNI_SIMD_PARAM_BACKEND, u32_parameter(backend));
+                result != UNI_SIMD_RESULT_SUCCESS) {
                 return result;
             }
-            states_[lane].reset(state);
-            invocations_[lane].parameters[0].value.u32 = creation[1].value.u32;
+            if (auto result = set(UNI_SIMD_PARAM_RESOLVED_BACKEND,
+                                  pointer_parameter(&invocation.resolved_backend));
+                result != UNI_SIMD_RESULT_SUCCESS) {
+                return result;
+            }
+            if (has_requirement(description_, requirement_scale)) {
+                if (auto result = set(UNI_SIMD_PARAM_SCALE, float_parameter(-7.0f));
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
+                }
+            }
+            if (has_requirement(description_, requirement_normalization)) {
+                if (auto result = set(UNI_SIMD_PARAM_NORMALIZATION_FACTOR, float_parameter(3.0f));
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
+                }
+            }
+            if (has_requirement(description_, requirement_rbw)) {
+                if (auto result = set(UNI_SIMD_PARAM_RBW_HZ, float_parameter(2.0f));
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
+                }
+            }
+            if (has_requirement(description_, requirement_taps) && description_.shape != WorkloadShape::pfb) {
+                if (auto result = set(UNI_SIMD_PARAM_TAPS, const_pointer_parameter(taps_[lane].data()));
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
+                }
+                if (auto result = set(UNI_SIMD_PARAM_TAP_COUNT, size_parameter(taps_[lane].size()));
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
+                }
+            }
+            if (has_requirement(description_, requirement_center_tap)) {
+                if (auto result = set(UNI_SIMD_PARAM_CENTER_TAP, float_parameter(0.25f));
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
+                }
+            }
+            if (description_.shape == WorkloadShape::pfb) {
+                const auto grid = description_.pfb_profile == PfbBenchmarkProfile::four_169 ||
+                                          description_.pfb_profile == PfbBenchmarkProfile::four_170
+                                      ? UNI_SIMD_PFB_HALF_BINS
+                                      : UNI_SIMD_PFB_INTEGER_BINS;
+                const auto* logical_bins = pfb_output_count() == pfb_logical_bins_.size()
+                                               ? pfb_logical_bins_.data()
+                                               : description_.pfb_profile == PfbBenchmarkProfile::short_33
+                                                     ? &pfb_three_bin_
+                                                     : &pfb_zero_bin_;
+                for (const auto result : {
+                         set(UNI_SIMD_PARAM_BIN_COUNT, size_parameter(description_.configuration)),
+                         set(UNI_SIMD_PARAM_DECIMATION, size_parameter(description_.configuration / 2U)),
+                         set(UNI_SIMD_PARAM_GRID_OFFSET, u32_parameter(grid)),
+                         set(UNI_SIMD_PARAM_TAPS, const_pointer_parameter(taps_[lane].data())),
+                         set(UNI_SIMD_PARAM_TAP_COUNT, size_parameter(taps_[lane].size())),
+                         set(UNI_SIMD_PARAM_LOGICAL_BINS, const_pointer_parameter(logical_bins)),
+                         set(UNI_SIMD_PARAM_LOGICAL_BIN_COUNT, size_parameter(pfb_output_count())),
+                         set(UNI_SIMD_PARAM_OUTPUT_COUNT, pointer_parameter(&invocation.output_count)),
+                     }) {
+                    if (result != UNI_SIMD_RESULT_SUCCESS) {
+                        return result;
+                    }
+                }
+                if (const auto result = uni_simd_kernel_execute(kernels_[lane].get(), nullptr, nullptr);
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    free_kernels();
+                    return result;
+                }
+            }
         }
         return UNI_SIMD_RESULT_SUCCESS;
     }
@@ -686,21 +714,16 @@ public:
                 .transform_count = item_count_ / description_.configuration,
                 .stride = description_.configuration,
             };
-            return uni_simd_execute(description_.kernel, nullptr, &values,
-                                    invocation.parameters.data(), invocation.parameter_count, nullptr);
+            return uni_simd_kernel_execute(kernels_[lane].get(), nullptr, &values);
         }
-        if (description_.shape == WorkloadShape::pfb) {
-            uni_simd_state_t* state = states_[lane].get();
-            return uni_simd_execute(description_.kernel, &invocation.input, &pfb_output_arrays_[lane],
-                                    invocation.parameters.data(), invocation.parameter_count, &state);
-        }
-        return uni_simd_execute(description_.kernel, &invocation.input, &invocation.output,
-                                invocation.parameters.data(), invocation.parameter_count, nullptr);
+        void* const output = description_.shape == WorkloadShape::pfb
+                                 ? static_cast<void*>(&pfb_output_arrays_[lane])
+                                 : static_cast<void*>(&invocation.output);
+        return uni_simd_kernel_execute(kernels_[lane].get(), &invocation.input, output);
     }
 
     [[nodiscard]] uni_simd_backend_e resolved_backend() const noexcept {
-        const std::size_t parameter_index = description_.shape == WorkloadShape::pfb ? 0U : 1U;
-        return invocations_.front().parameters[parameter_index].value.u32;
+        return invocations_.front().resolved_backend;
     }
 
     void prepare_measurement(const std::size_t lane) {
@@ -850,7 +873,6 @@ private:
                                               ? description_.configuration * 8U + 1U
                                               : description_.configuration * 8U;
             taps_ = make_lanes<float>(lanes, tap_count);
-            states_.resize(lanes);
             pfb_output_buffers_.resize(lanes);
             for (auto& buffers : pfb_output_buffers_) {
                 buffers.resize(output_count);
@@ -962,10 +984,11 @@ private:
         }
     }
 
-    void free_states() noexcept {
-        for (auto& state : states_) {
-            state.reset();
+    void free_kernels() noexcept {
+        for (auto& kernel : kernels_) {
+            kernel.reset();
         }
+        kernels_.clear();
     }
 
     [[nodiscard]] std::size_t pfb_output_count() const noexcept {
@@ -1000,7 +1023,7 @@ private:
     AlignedBuffer<std::uint8_t> u8_reference_;
     AlignedBuffer<float> f32_reference_;
     std::vector<Invocation> invocations_;
-    std::vector<StatePtr> states_;
+    std::vector<KernelPtr> kernels_;
     std::vector<std::vector<uni_simd_buffer_t>> pfb_output_buffers_;
     std::vector<uni_simd_buffer_array_t> pfb_output_arrays_;
     std::array<std::int32_t, 4U> pfb_logical_bins_{-2, -1, 0, 1};

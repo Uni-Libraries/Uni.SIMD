@@ -61,13 +61,13 @@ enum {
     UNI_SIMD_PFB_HALF_BINS = 1
 };
 
-/** Identifier of a value in the parameter array passed to uni_simd_execute(). */
-typedef uint32_t uni_simd_param_id_e;
+/** Identifier of a value configured with uni_simd_kernel_param_set(). */
+typedef uint32_t uni_simd_param_id;
 enum {
     UNI_SIMD_PARAM_UNKNOWN = 0,
     /** U32 input: requested uni_simd_backend_e. */
     UNI_SIMD_PARAM_BACKEND = 1,
-    /** U32 output: actual uni_simd_backend_e used by a successful call. */
+    /** POINTER output: receives the uni_simd_backend_e used by a successful call. */
     UNI_SIMD_PARAM_RESOLVED_BACKEND = 2,
     /** U32 input: uni_simd_math_mode_e. */
     UNI_SIMD_PARAM_MATH_MODE = 3,
@@ -97,27 +97,12 @@ enum {
     UNI_SIMD_PARAM_LOGICAL_BINS = 15,
     /** SIZE input: number of logical bins. */
     UNI_SIMD_PARAM_LOGICAL_BIN_COUNT = 16,
-    /** SIZE output: PFB samples produced or predicted per output buffer. */
+    /** POINTER output: receives the PFB samples produced or predicted per output buffer. */
     UNI_SIMD_PARAM_OUTPUT_COUNT = 17,
     /** U32 input boolean: query PFB output count without advancing state. */
     UNI_SIMD_PARAM_QUERY_OUTPUT_COUNT = 18,
     /** U32 input boolean: clear PFB streaming history before processing. */
     UNI_SIMD_PARAM_RESET = 19
-};
-
-/** Runtime type tag for uni_simd_param_t::value. */
-typedef uint32_t uni_simd_param_type_e;
-enum {
-    /** Invalid placeholder type. */
-    UNI_SIMD_PARAM_TYPE_UNKNOWN = 0,
-    /** Value is stored in value.u32. */
-    UNI_SIMD_PARAM_TYPE_U32 = 1,
-    /** Value is stored in value.size. */
-    UNI_SIMD_PARAM_TYPE_SIZE = 2,
-    /** Value is stored in value.f32. */
-    UNI_SIMD_PARAM_TYPE_FLOAT32 = 3,
-    /** Value is stored in value.const_pointer and remains caller-owned. */
-    UNI_SIMD_PARAM_TYPE_CONST_POINTER = 4
 };
 
 /** Number of adjacent floats used to store one interleaved complex sample: real, then imaginary. */
@@ -158,17 +143,14 @@ typedef struct uni_simd_split_cf32_t {
 /** Current value required in uni_simd_split_cf32_t::descriptor_size. */
 #define UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE sizeof(uni_simd_split_cf32_t)
 
-/** Typed parameter. IDs are unique within one call; duplicate IDs are invalid. */
-typedef struct uni_simd_param_t {
-    uni_simd_param_id_e param_id;
-    uni_simd_param_type_e param_type;
-    union {
-        uint32_t u32;
-        size_t size;
-        float f32;
-        const void* const_pointer;
-    } value;
-} uni_simd_param_t;
+/** Parameter value. The field used by each ID is documented above. */
+typedef union uni_simd_param_val {
+    uint32_t u32;
+    size_t size;
+    float f32;
+    const void* const_pointer;
+    void* pointer;
+} uni_simd_param_val;
 
-/** Opaque state. Only stateful kernels create instances of this type. */
-typedef struct uni_simd_state_t uni_simd_state_t;
+/** Opaque configured kernel instance. */
+typedef struct uni_simd_kernel_t uni_simd_kernel_t;

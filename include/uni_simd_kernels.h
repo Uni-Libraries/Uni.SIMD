@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 /**
- * Operations accepted by uni_simd_execute().
+ * Operations accepted by uni_simd_kernel_create().
  *
  * Unless stated otherwise, input points to uni_simd_const_buffer_t, output
  * points to uni_simd_buffer_t, buffers require only natural element alignment
@@ -78,9 +78,8 @@ enum {
     UNI_SIMD_KERNEL_IFFT_SPLIT_CF32 = 13,
 
     /**
-     * Stateful streaming PFB channelizer. See uni_simd_execute() for its
-     * creation, query, reset, and processing protocol. Release returned state
-     * with uni_simd_state_free().
+     * Stateful streaming PFB channelizer. See uni_simd_kernel_execute() for its
+     * creation, query, reset, and processing protocol.
      */
     UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32 = 14
 };

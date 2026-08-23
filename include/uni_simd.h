@@ -20,8 +20,8 @@ extern "C" {
 /**
  * Initializes the process-wide Uni.SIMD runtime.
  *
- * The function is thread-safe and idempotent. Calls to uni_simd_execute()
- * before successful initialization return UNI_SIMD_RESULT_NOT_INITIALIZED.
+ * The function is thread-safe and idempotent. Kernel creation and operations
+ * before successful initialization fail.
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_initialize(void);
 
@@ -29,63 +29,70 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_initialize(void);
  * Finalizes the process-wide runtime.
  *
  * The function is thread-safe and idempotent. It returns
- * UNI_SIMD_RESULT_INVALID_STATE without finalizing while any opaque state is
- * alive. Release every state through uni_simd_state_free() first.
+ * UNI_SIMD_RESULT_INVALID_STATE without finalizing while any kernel instance is
+ * alive. Release every instance through uni_simd_kernel_free() first.
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_finalize(void);
 
 /**
- * Releases state created by a stateful kernel.
+ * Creates a kernel instance.
  *
- * Passing NULL is allowed and has no effect. The state must not be used by
- * another thread while it is being released. The caller must discard its
- * pointer after this function returns.
+ * Returns NULL for an invalid ID, unavailable runtime, or allocation failure.
  */
-UNI_SIMD_API void UNI_SIMD_CALL uni_simd_state_free(uni_simd_state_t* state);
+UNI_SIMD_API uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(uni_simd_kernel_e kernel);
 
 /**
- * Executes one kernel.
+ * Sets or replaces one kernel parameter. The value field is inferred from the
+ * parameter ID. Borrowed pointers must remain valid while the library may
+ * access them. PFB configuration arrays are copied when streaming state is
+ * created.
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set(
+    uni_simd_kernel_t* kernel, uni_simd_param_id param, uni_simd_param_val val);
+
+/** Releases a kernel instance. Passing NULL is a successful no-op. */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kernel_t* kernel);
+
+/**
+ * Executes a configured kernel instance.
  *
  * Common optional parameters are U32 BACKEND (default AUTOMATIC), U32
- * MATH_MODE (default FAST), U32 PREFER_ENERGY_EFFICIENCY (0 or 1), and U32
- * RESOLVED_BACKEND. RESOLVED_BACKEND is an output parameter updated with the
- * implementation that actually ran. Parameter IDs must be unique and their
- * runtime types must match the declarations in uni_simd_typedefs.h. For PFB,
- * backend and math-selection parameters are accepted only while creating state.
+ * MATH_MODE (default FAST), U32 PREFER_ENERGY_EFFICIENCY (0 or 1), and POINTER
+ * RESOLVED_BACKEND. The pointer receives the implementation that actually ran.
+ * For PFB, creation parameters cannot be changed after its first successful
+ * execution has created streaming state.
  *
- * Stateless kernels ignore state and require it to be NULL or to point to a
- * NULL state. Their input/output descriptor types and kernel-specific
- * parameters are documented in uni_simd_kernels.h.
+ * Input/output descriptor types and kernel-specific parameters are documented
+ * in uni_simd_kernels.h.
  *
  * PFB protocol:
- * - Creation: *state must be NULL. Required parameters are SIZE BIN_COUNT,
+ * - Configuration: required parameters are SIZE BIN_COUNT,
  *   SIZE DECIMATION, U32 GRID_OFFSET, CONST_POINTER TAPS, SIZE TAP_COUNT,
  *   CONST_POINTER LOGICAL_BINS, and SIZE LOGICAL_BIN_COUNT. Configuration is
- *   copied. input/output may be NULL to create without processing.
+ *   copied when streaming state is created. input/output may be NULL on the
+ *   first execution to create state without processing.
  * - Processing: input points to uni_simd_const_buffer_t whose data is a flat
  *   interleaved {real, imaginary} float array; output points to
  *   uni_simd_buffer_array_t with one equally formatted buffer per logical bin.
- *   Buffer counts are complex-sample counts. SIZE OUTPUT_COUNT is an optional
+ *   Buffer counts are complex-sample counts. POINTER OUTPUT_COUNT is an optional
  *   output parameter receiving samples produced per output.
- * - Query: U32 QUERY_OUTPUT_COUNT=1 and a SIZE OUTPUT_COUNT parameter compute
+ * - Query: U32 QUERY_OUTPUT_COUNT=1 and a POINTER OUTPUT_COUNT parameter compute
  *   the next output count from input->count without advancing state; output is
- *   ignored and input->data may be NULL.
+ *   ignored and input->data may be NULL. QUERY_OUTPUT_COUNT is consumed by the
+ *   next execution attempt.
  * - Reset: U32 RESET=1 clears history immediately before processing, after all
- *   descriptors and capacities have been validated. Reset and query cannot be
- *   combined.
- * - Destruction: release the opaque state with uni_simd_state_free().
+ *   descriptors and capacities have been validated. RESET is consumed by the
+ *   next execution attempt. Reset and query cannot be combined.
+ * - Destruction: release the kernel with uni_simd_kernel_free().
  *
  * Buffers are borrowed for the duration of the call and require their element
  * type's natural alignment, but no additional SIMD alignment. Except for COPY_U8 and
  * documented exact in-place kernels, active input and output ranges must not
- * overlap. A stateful instance must not be used concurrently.
+ * overlap. Operations on one kernel instance are serialized; separate instances
+ * may execute concurrently.
  */
-UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_execute(uni_simd_kernel_e kernel,
-                                                              const void* input,
-                                                              void* output,
-                                                              uni_simd_param_t* params,
-                                                              size_t params_len,
-                                                              uni_simd_state_t** state);
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(
+    uni_simd_kernel_t* kernel, const void* input, void* output);
 
 #ifdef __cplusplus
 }

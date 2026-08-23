@@ -19,8 +19,9 @@ Tests and benchmarks default to enabled for a top-level build and disabled when
 the project is included as a subdirectory. Use `UNI_SIMD_BUILD_TESTS`,
 `UNI_SIMD_BUILD_BENCHMARKS`, and `UNI_SIMD_ENABLE_SANITIZERS` to override this.
 `BUILD_SHARED_LIBS=ON` builds a shared library whose public ABI contains only
-`uni_simd_initialize`, `uni_simd_finalize`, `uni_simd_execute`, and
-`uni_simd_state_free`.
+`uni_simd_initialize`, `uni_simd_finalize`, `uni_simd_kernel_create`,
+`uni_simd_kernel_param_set`, `uni_simd_kernel_execute`, and
+`uni_simd_kernel_free`.
 
 CMake generates `uni_simd_export.h` and `uni_simd_version.h` in the build tree.
 The installed package exports the `Uni::SIMD` target and installs those generated
@@ -46,9 +47,15 @@ if (uni_simd_initialize() != UNI_SIMD_RESULT_SUCCESS) {
     return 1;
 }
 
-uni_simd_result_e result = uni_simd_execute(
-    UNI_SIMD_KERNEL_PACK_BITS_LSB_U8,
-    &input, &output, NULL, 0, NULL);
+uni_simd_kernel_t* kernel =
+    uni_simd_kernel_create(UNI_SIMD_KERNEL_PACK_BITS_LSB_U8);
+if (kernel == NULL) {
+    return 1;
+}
+
+uni_simd_result_e result =
+    uni_simd_kernel_execute(kernel, &input, &output);
+uni_simd_kernel_free(kernel);
 
 if (uni_simd_finalize() != UNI_SIMD_RESULT_SUCCESS) {
     return 1;
@@ -63,10 +70,11 @@ element counts. Complex buffers use flat `float` storage in
 `uni_simd_buffer_array_t`. The kernel documentation in
 `uni_simd_kernels.h` defines each element type and required parameter.
 
-Parameters are typed `uni_simd_param_t` entries. Common optional parameters
-select a backend and math mode or report the resolved backend. Kernel-specific
-parameters carry values such as scale, taps, normalization, and PFB
-configuration. Duplicate IDs and mismatched runtime types are rejected.
+Parameters are stored in a kernel instance with `uni_simd_kernel_param_set()`.
+The parameter ID determines which field of `uni_simd_param_val` is used. Common
+optional parameters select a backend and math mode or report the resolved
+backend through `val.pointer`. Kernel-specific parameters carry values such as
+scale, taps, normalization, and PFB configuration.
 
 ### Batched IFFT
 
@@ -86,9 +94,11 @@ uni_simd_split_cf32_t transforms = {
     .stride = 8,
 };
 
-uni_simd_result_e result = uni_simd_execute(
-    UNI_SIMD_KERNEL_IFFT_SPLIT_CF32,
-    NULL, &transforms, NULL, 0, NULL);
+uni_simd_kernel_t* kernel =
+    uni_simd_kernel_create(UNI_SIMD_KERNEL_IFFT_SPLIT_CF32);
+uni_simd_result_e result =
+    uni_simd_kernel_execute(kernel, NULL, &transforms);
+uni_simd_kernel_free(kernel);
 ```
 
 Supported transform sizes are 4, 8, 16, and 32. `stride` is measured in float
@@ -99,16 +109,18 @@ shared radix-2 SIMD stages for 16/32-point transforms; the measured faster
 radix-decomposition is retained for AVX2/FMA IFFT-8. IFFT-4 remains generic because
 SIMD setup and permutation overhead is larger than the transform itself.
 
-## State
+## Kernel Lifetime
 
-All primitive and IFFT kernels are stateless. The streaming PFB channelizer is
-the only stateful kernel and receives `uni_simd_state_t**`.
+Every operation uses an opaque `uni_simd_kernel_t`. Primitive and IFFT instances
+hold configuration only. The streaming PFB channelizer additionally owns stream
+history.
 
-The first PFB call passes configuration parameters and a pointer to a NULL state;
-the library validates and copies the configuration and returns an opaque state.
-Later calls process blocks, query the next output count, or reset history.
-`uni_simd_state_free()` releases the opaque state and accepts NULL as a no-op.
-`uni_simd_finalize()` refuses to finalize while any state remains alive.
+Configure PFB through `uni_simd_kernel_param_set()` before its first execution.
+The first execution validates and copies the configuration and creates streaming
+state. Later calls process blocks, query the next output count, or reset history.
+Creation parameters cannot be changed after streaming state exists.
+`uni_simd_kernel_free()` accepts NULL as a successful no-op, and
+`uni_simd_finalize()` refuses to finalize while any kernel instance remains alive.
 
 PFB supports 4, 8, 16, and 32 bins. Decimation is a nonzero divisor of the bin
 count. A configuration accepts at most 1025 finite real taps and up to eight
@@ -136,10 +148,10 @@ y_b[h] = sum_k taps[k] * input[h*D-k]
 
 Input and output use interleaved `{real, imaginary}` floats and are processed
 directly without internal block-sized conversion buffers. Configuration and
-coefficient tables are copied at state creation; steady-state processing does
-not allocate. A failed processing call does not reset or advance state. A state
-is single-stream and must not be used concurrently, while separate states and
-stateless IFFT calls may run concurrently.
+coefficient tables are copied when streaming state is created; steady-state
+processing does not allocate. A failed processing call does not reset or advance
+state. A PFB kernel is single-stream and must not be used concurrently, while
+separate kernel instances may run concurrently.
 
 ## Benchmarks
 
