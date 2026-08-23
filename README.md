@@ -20,8 +20,8 @@ the project is included as a subdirectory. Use `UNI_SIMD_BUILD_TESTS`,
 `UNI_SIMD_BUILD_BENCHMARKS`, and `UNI_SIMD_ENABLE_SANITIZERS` to override this.
 `BUILD_SHARED_LIBS=ON` builds a shared library whose public ABI contains only
 `uni_simd_initialize`, `uni_simd_finalize`, `uni_simd_kernel_create`,
-`uni_simd_kernel_param_set`, `uni_simd_kernel_execute`, and
-`uni_simd_kernel_free`.
+`uni_simd_kernel_param_set`, `uni_simd_kernel_param_set_many`,
+`uni_simd_kernel_reset`, `uni_simd_kernel_execute`, and `uni_simd_kernel_free`.
 
 CMake generates `uni_simd_export.h` and `uni_simd_version.h` in the build tree.
 The installed package exports the `Uni::SIMD` target and installs those generated
@@ -71,9 +71,11 @@ element counts. Complex buffers use flat `float` storage in
 `uni_simd_kernels.h` defines each element type and required parameter.
 
 Parameters are stored in a kernel instance with `uni_simd_kernel_param_set()`.
-The parameter ID determines which field of `uni_simd_param_val` is used. Common
-optional parameters select a backend and math mode or report the resolved
-backend through `val.pointer`. Kernel-specific parameters carry values such as
+Each `uni_simd_param_t` contains an ID and value; the ID determines which value
+field is used. `uni_simd_kernel_param_set_many()` atomically applies a batch under
+one lock and leaves the previous configuration unchanged if any item is invalid.
+Common optional parameters select a backend and math mode or report the resolved
+backend through `value.pointer`. Kernel-specific parameters carry values such as
 scale, taps, normalization, and PFB configuration.
 
 ### Batched IFFT
@@ -117,7 +119,9 @@ history.
 
 Configure PFB through `uni_simd_kernel_param_set()` before its first execution.
 The first execution validates and copies the configuration and creates streaming
-state. Later calls process blocks, query the next output count, or reset history.
+state. Later calls process blocks or query the next output count;
+`uni_simd_kernel_reset()` clears PFB history directly. The legacy one-shot RESET
+parameter remains accepted.
 Creation parameters cannot be changed after streaming state exists.
 `uni_simd_kernel_free()` accepts NULL as a successful no-op, and
 `uni_simd_finalize()` refuses to finalize while any kernel instance remains alive.
@@ -129,13 +133,16 @@ zero, and the first output is emitted for input sample zero. There is no
 end-of-stream flush operation.
 
 AVX2/FMA and AArch64 NEON PFB implementations cover every supported bin count,
-decimation, tap count, grid offset, and output selection. SIMD code is specialized
-only by vector/FFT width; it has no hard-coded coefficient or channel profile.
-Up to four output hops share coefficient loads when the mirrored history ring has
-enough overwrite headroom. A single selected channel uses a direct SIMD transform;
-multiple channels use one batched backend IFFT call for all queued hops. Optimized FIR reductions may
-round differently for different block fragmentation; deterministic math mode uses
-the generic path when bit-stable execution is required.
+decimation, tap count, grid offset, and output selection. An explicit AVX-512
+request uses a 32-bin implementation and falls back to AVX2/FMA for smaller
+transforms; automatic dispatch keeps AVX2/FMA because AVX-512 is not consistently
+faster across core classes. SIMD code is specialized only by vector/FFT width.
+The mirrored history ring guarantees enough overwrite headroom for four output
+hops to share coefficient loads. A single selected channel uses a direct SIMD
+transform; multiple channels use one batched backend IFFT call for all queued
+hops. Optimized FIR reductions may round differently for different block
+fragmentation; deterministic math mode uses the generic path when bit-stable
+execution is required.
 
 For bin `b`, grid offset `delta` (`0` or `0.5`), decimation `D`, and hop `h`,
 the channelizer computes the following unscaled output, with samples before the
@@ -158,6 +165,7 @@ separate kernel instances may run concurrently.
 ```sh
 ./build/src_benchmark/uni_simd_benchmark
 ./build/src_benchmark/uni_simd_benchmark --thorough
+./build/src_benchmark/uni_simd_benchmark --kernel pfb
 ```
 
 The default quick run uses three iterations, one warmup batch, and 1 ms samples;

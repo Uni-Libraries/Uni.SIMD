@@ -62,7 +62,10 @@ bool PfbChannelizer_supports_all(const PfbChannelizerData&) noexcept {
 
 std::expected<std::unique_ptr<PfbChannelizerData>, Result>
 make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChannelizerFn candidate,
-                          const PfbChannelizerSupportFn supports, const Backend backend) noexcept {
+                           const PfbChannelizerSupportFn supports, const Backend backend,
+                           const PfbChannelizerFn fallback,
+                           const PfbChannelizerSupportFn fallback_supports,
+                           const Backend fallback_backend) noexcept {
     if (!supported_bin_count(config.bin_count) || config.decimation == 0U ||
         config.bin_count % config.decimation != 0U || config.taps.empty() ||
         config.taps.size() > pfb_channelizer_max_taps ||
@@ -91,7 +94,8 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
         data->decimation_value = config.decimation;
         data->taps = config.taps.size();
         data->rows = (config.taps.size() + config.bin_count - 1U) / config.bin_count;
-        data->history_size = next_power_of_two(data->rows * config.bin_count);
+        const std::size_t filter_span = data->rows * config.bin_count;
+        data->history_size = next_power_of_two(filter_span + 3U * config.decimation);
         data->offset = config.grid_offset;
         data->selected_bins.assign(config.logical_bins.begin(), config.logical_bins.end());
         data->selected_fft_bins.resize(data->selected_bins.size());
@@ -151,14 +155,28 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
                 for (std::size_t branch = 0U; branch < data->bins; ++branch) {
                     const double angle = 2.0 * pi * static_cast<double>(branch * fft_bin) /
                                          static_cast<double>(data->bins);
-                    data->selected_transform_re[branch] = snapped_trigonometric(std::cos(angle));
-                    data->selected_transform_im[branch] = snapped_trigonometric(std::sin(angle));
+                    const double weight_re = std::cos(angle);
+                    const double weight_im = std::sin(angle);
+                    const double rotation_re = data->branch_rotation_re[branch];
+                    const double rotation_im = data->branch_rotation_im[branch];
+                    data->selected_transform_re[branch] = snapped_trigonometric(
+                        rotation_re * weight_re - rotation_im * weight_im);
+                    data->selected_transform_im[branch] = snapped_trigonometric(
+                        rotation_re * weight_im + rotation_im * weight_re);
                 }
             }
         }
         data->history.resize(4U * data->history_size);
-        data->process = candidate != nullptr && supports != nullptr && supports(*data) ? candidate : &PfbChannelizer_generic;
-        data->selected_backend = data->process == candidate ? backend : Backend::generic;
+        if (candidate != nullptr && supports != nullptr && supports(*data)) {
+            data->process = candidate;
+            data->selected_backend = backend;
+        } else if (fallback != nullptr && fallback_supports != nullptr && fallback_supports(*data)) {
+            data->process = fallback;
+            data->selected_backend = fallback_backend;
+        } else {
+            data->process = &PfbChannelizer_generic;
+            data->selected_backend = Backend::generic;
+        }
         return data;
     } catch (const std::bad_alloc&) {
         return std::unexpected(Result::out_of_memory);

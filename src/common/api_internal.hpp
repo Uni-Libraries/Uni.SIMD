@@ -213,6 +213,9 @@ private:
     PfbChannelizerFn pfb_channelizer_ = nullptr;
     PfbChannelizerSupportFn pfb_channelizer_support_ = nullptr;
     Backend pfb_channelizer_backend_ = Backend::generic;
+    PfbChannelizerFn pfb_channelizer_fallback_ = nullptr;
+    PfbChannelizerSupportFn pfb_channelizer_fallback_support_ = nullptr;
+    Backend pfb_channelizer_fallback_backend_ = Backend::generic;
     IfftFn ifft_ = nullptr;
     IfftSupportFn ifft_support_ = nullptr;
     Backend ifft_backend_ = Backend::generic;

@@ -120,6 +120,7 @@ struct KernelDescription {
     std::size_t configuration = 0U;
     bool all_profiles = true;
     PfbBenchmarkProfile pfb_profile = PfbBenchmarkProfile::single_output;
+    std::size_t fixed_item_count = 0U;
 };
 
 constexpr std::array kKernelDescriptions{
@@ -194,6 +195,10 @@ constexpr std::array kKernelDescriptions{
                       UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
                       requirement_transform_size | requirement_taps | requirement_state,
                       BackendPolicy::dispatched, 32U, true, PfbBenchmarkProfile::four_outputs},
+    KernelDescription{"pfb_cf32_8_tiny", "eight-bin short-filter PFB, 32-sample call",
+                      UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32, WorkloadShape::pfb,
+                      requirement_transform_size | requirement_taps | requirement_state,
+                      BackendPolicy::dispatched, 8U, false, PfbBenchmarkProfile::short_33, 32U},
 };
 
 constexpr std::size_t kBufferAlignment = 128U;
@@ -206,6 +211,7 @@ struct Config {
     std::size_t warmup = 1U;
     std::size_t sample_milliseconds = 1U;
     std::string_view preset = "quick";
+    std::string_view kernel_filter;
 };
 
 struct Statistics {
@@ -306,7 +312,8 @@ public:
 }
 
 void print_usage(const std::string_view program) {
-    fmt::print("Usage: {} [--thorough] [--iterations N] [--warmup N] [--sample-ms N]\n", program);
+    fmt::print("Usage: {} [--thorough] [--iterations N] [--warmup N] [--sample-ms N] [--kernel TEXT]\n",
+               program);
 }
 
 [[nodiscard]] ParseResult parse_arguments(const int argc, char** argv, Config& config) {
@@ -320,6 +327,14 @@ void print_usage(const std::string_view program) {
             config.warmup = 10U;
             config.sample_milliseconds = 10U;
             config.preset = "thorough";
+            continue;
+        }
+        if (argument == "--kernel") {
+            if (++index == argc) {
+                std::cerr << "Missing value for " << argument << '\n';
+                return ParseResult::error;
+            }
+            config.kernel_filter = argv[index];
             continue;
         }
         if (argument != "--iterations" && argument != "--samples" && argument != "--warmup" &&
@@ -344,6 +359,14 @@ void print_usage(const std::string_view program) {
             config.sample_milliseconds = *value;
         }
         config.preset = "custom";
+    }
+    if (!config.kernel_filter.empty() &&
+        std::none_of(kKernelDescriptions.begin(), kKernelDescriptions.end(),
+                     [&](const KernelDescription& description) {
+                         return description.name.contains(config.kernel_filter);
+                     })) {
+        std::cerr << "No kernel matches filter: " << config.kernel_filter << '\n';
+        return ParseResult::error;
     }
     return ParseResult::run;
 }
@@ -624,7 +647,7 @@ public:
                 return UNI_SIMD_RESULT_OUT_OF_MEMORY;
             }
             auto set = [&](const uni_simd_param_id id, const uni_simd_param_val value) {
-                return uni_simd_kernel_param_set(kernels_[lane].get(), id, value);
+                return uni_simd_kernel_param_set(kernels_[lane].get(), {id, value});
             };
             if (auto result = set(UNI_SIMD_PARAM_BACKEND, u32_parameter(backend));
                 result != UNI_SIMD_RESULT_SUCCESS) {
@@ -679,19 +702,20 @@ public:
                                                : description_.pfb_profile == PfbBenchmarkProfile::short_33
                                                      ? &pfb_three_bin_
                                                      : &pfb_zero_bin_;
-                for (const auto result : {
-                         set(UNI_SIMD_PARAM_BIN_COUNT, size_parameter(description_.configuration)),
-                         set(UNI_SIMD_PARAM_DECIMATION, size_parameter(description_.configuration / 2U)),
-                         set(UNI_SIMD_PARAM_GRID_OFFSET, u32_parameter(grid)),
-                         set(UNI_SIMD_PARAM_TAPS, const_pointer_parameter(taps_[lane].data())),
-                         set(UNI_SIMD_PARAM_TAP_COUNT, size_parameter(taps_[lane].size())),
-                         set(UNI_SIMD_PARAM_LOGICAL_BINS, const_pointer_parameter(logical_bins)),
-                         set(UNI_SIMD_PARAM_LOGICAL_BIN_COUNT, size_parameter(pfb_output_count())),
-                         set(UNI_SIMD_PARAM_OUTPUT_COUNT, pointer_parameter(&invocation.output_count)),
-                     }) {
-                    if (result != UNI_SIMD_RESULT_SUCCESS) {
-                        return result;
-                    }
+                std::array parameters{
+                    uni_simd_param_t{UNI_SIMD_PARAM_BIN_COUNT, size_parameter(description_.configuration)},
+                    uni_simd_param_t{UNI_SIMD_PARAM_DECIMATION, size_parameter(description_.configuration / 2U)},
+                    uni_simd_param_t{UNI_SIMD_PARAM_GRID_OFFSET, u32_parameter(grid)},
+                    uni_simd_param_t{UNI_SIMD_PARAM_TAPS, const_pointer_parameter(taps_[lane].data())},
+                    uni_simd_param_t{UNI_SIMD_PARAM_TAP_COUNT, size_parameter(taps_[lane].size())},
+                    uni_simd_param_t{UNI_SIMD_PARAM_LOGICAL_BINS, const_pointer_parameter(logical_bins)},
+                    uni_simd_param_t{UNI_SIMD_PARAM_LOGICAL_BIN_COUNT, size_parameter(pfb_output_count())},
+                    uni_simd_param_t{UNI_SIMD_PARAM_OUTPUT_COUNT, pointer_parameter(&invocation.output_count)},
+                };
+                if (const auto result = uni_simd_kernel_param_set_many(
+                        kernels_[lane].get(), parameters.data(), parameters.size());
+                    result != UNI_SIMD_RESULT_SUCCESS) {
+                    return result;
                 }
                 if (const auto result = uni_simd_kernel_execute(kernels_[lane].get(), nullptr, nullptr);
                     result != UNI_SIMD_RESULT_SUCCESS) {
@@ -861,6 +885,10 @@ private:
                 profile_.working_set_bytes * decimation /
                     (2U * sizeof(float) * (decimation + output_count)));
             item_count_ -= item_count_ % decimation;
+            if (description_.fixed_item_count != 0U) {
+                item_count_ = description_.fixed_item_count;
+                item_count_ -= item_count_ % decimation;
+            }
             f32_inputs_ = make_lanes<float>(lanes, item_count_ * 2U);
             f32_outputs_ = make_lanes<float>(lanes, item_count_ / decimation * 2U * output_count);
             const std::size_t tap_count = description_.pfb_profile == PfbBenchmarkProfile::four_169
@@ -1223,8 +1251,11 @@ void run_kernel(const KernelDescription& description, const Config& config, cons
 }
 
 void run_benchmark_profile(const Config& config, const WorkloadProfile& profile,
-                           const std::size_t profile_index, BenchmarkResults& results) {
+                            const std::size_t profile_index, BenchmarkResults& results) {
     for (const auto& description : kKernelDescriptions) {
+        if (!config.kernel_filter.empty() && !description.name.contains(config.kernel_filter)) {
+            continue;
+        }
         if (!description.all_profiles && profile_index != 0U) {
             continue;
         }
@@ -1301,7 +1332,12 @@ void print_topology_table(const Config& config, const topology::Result& result,
     print_summary_row("Packages / NUMA nodes", fmt::format("{} / {}", result.snapshot.package_count,
                                                             result.snapshot.numa_node_count));
     print_summary_row("Core types", std::to_string(core_classes.size()));
-    print_summary_row("Kernels", fmt::format("{} table entries covering 14 public kernels", kKernelDescriptions.size()));
+    const auto selected_kernels = std::count_if(
+        kKernelDescriptions.begin(), kKernelDescriptions.end(),
+        [&](const KernelDescription& description) {
+            return config.kernel_filter.empty() || description.name.contains(config.kernel_filter);
+        });
+    print_summary_row("Kernels", fmt::format("{} selected table entries", selected_kernels));
     print_summary_row("Working sets", std::move(working_sets));
     print_summary_row("Measurement", fmt::format("{}: iterations={}, warmup={}, target={} ms", config.preset,
                                                  config.iterations, config.warmup, config.sample_milliseconds));

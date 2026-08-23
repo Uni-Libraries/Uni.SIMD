@@ -38,6 +38,15 @@ static uni_simd_param_val pointer_val(void* value) {
     return val;
 }
 
+static uni_simd_result_e set_param_legacy(uni_simd_kernel_t* kernel,
+                                          uni_simd_param_id id,
+                                          uni_simd_param_val value) {
+    const uni_simd_param_t param = {id, value};
+    return uni_simd_kernel_param_set(kernel, param);
+}
+
+#define uni_simd_kernel_param_set(kernel, id, value) set_param_legacy((kernel), (id), (value))
+
 static uni_simd_kernel_t* create_kernel(uni_simd_kernel_e id) {
     uni_simd_kernel_t* kernel = uni_simd_kernel_create(id);
     assert(kernel != NULL);
@@ -64,12 +73,21 @@ int main(void) {
 
     uni_simd_kernel_t* kernel = create_kernel(UNI_SIMD_KERNEL_PACK_BITS_LSB_U8);
     uni_simd_backend_e resolved_backend = UNI_SIMD_BACKEND_AUTOMATIC;
-    assert(uni_simd_kernel_param_set(kernel, UNI_SIMD_PARAM_BACKEND,
-                                     u32_val(UNI_SIMD_BACKEND_GENERIC)) == UNI_SIMD_RESULT_SUCCESS);
-    assert(uni_simd_kernel_param_set(kernel, UNI_SIMD_PARAM_RESOLVED_BACKEND,
-                                     pointer_val(&resolved_backend)) == UNI_SIMD_RESULT_SUCCESS);
+    uni_simd_param_t setup_params[2] = {
+        {UNI_SIMD_PARAM_BACKEND, u32_val(UNI_SIMD_BACKEND_GENERIC)},
+        {UNI_SIMD_PARAM_RESOLVED_BACKEND, pointer_val(&resolved_backend)},
+    };
+    assert(uni_simd_kernel_param_set_many(kernel, setup_params, 2U) == UNI_SIMD_RESULT_SUCCESS);
+    uni_simd_param_t invalid_batch[2] = {
+        {UNI_SIMD_PARAM_BACKEND, u32_val(UNI_SIMD_BACKEND_AUTOMATIC)},
+        {UNI_SIMD_PARAM_SCALE, f32_val(1.0f)},
+    };
+    assert(uni_simd_kernel_param_set_many(kernel, invalid_batch, 2U) ==
+           UNI_SIMD_RESULT_INVALID_ARGUMENT);
+    assert(uni_simd_kernel_param_set_many(kernel, NULL, 0U) == UNI_SIMD_RESULT_SUCCESS);
     assert(uni_simd_kernel_param_set(kernel, UNI_SIMD_PARAM_SCALE, f32_val(1.0f)) ==
            UNI_SIMD_RESULT_INVALID_ARGUMENT);
+    assert(uni_simd_kernel_reset(kernel) == UNI_SIMD_RESULT_INVALID_ARGUMENT);
     assert(uni_simd_kernel_execute(kernel, &bits_input, &packed_output) == UNI_SIMD_RESULT_SUCCESS);
     assert(resolved_backend == UNI_SIMD_BACKEND_GENERIC);
     assert(packed[0] == 0x4dU && packed[1] == 0x96U);
@@ -227,6 +245,7 @@ int main(void) {
                                      pointer_val(&resolved_backend)) == UNI_SIMD_RESULT_SUCCESS);
     assert(uni_simd_kernel_param_set(kernel, UNI_SIMD_PARAM_OUTPUT_COUNT,
                                      pointer_val(&output_count)) == UNI_SIMD_RESULT_SUCCESS);
+    assert(uni_simd_kernel_reset(kernel) == UNI_SIMD_RESULT_INVALID_STATE);
 
     const float failed_input_samples[10] = {0.0f};
     float failed_output_samples[2] = {0.0f};
@@ -275,8 +294,7 @@ int main(void) {
            UNI_SIMD_RESULT_SUCCESS);
     assert(fabsf(continuation_output[0] - 40.0f) < 1.0e-6f && fabsf(continuation_output[1]) < 1.0e-6f);
 
-    assert(uni_simd_kernel_param_set(kernel, UNI_SIMD_PARAM_RESET, u32_val(1U)) == UNI_SIMD_RESULT_SUCCESS);
-    assert(uni_simd_kernel_execute(kernel, NULL, NULL) == UNI_SIMD_RESULT_SUCCESS);
+    assert(uni_simd_kernel_reset(kernel) == UNI_SIMD_RESULT_SUCCESS);
     assert(uni_simd_kernel_execute(kernel, NULL, NULL) == UNI_SIMD_RESULT_INVALID_ARGUMENT);
     free_kernel(kernel);
     assert(uni_simd_kernel_free(NULL) == UNI_SIMD_RESULT_SUCCESS);

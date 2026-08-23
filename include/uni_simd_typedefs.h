@@ -152,5 +152,11 @@ typedef union uni_simd_param_val {
     void* pointer;
 } uni_simd_param_val;
 
+/** One typed parameter assignment for uni_simd_kernel_param_set[_many](). */
+typedef struct uni_simd_param_t {
+    uni_simd_param_id id;
+    uni_simd_param_val value;
+} uni_simd_param_t;
+
 /** Opaque configured kernel instance. */
 typedef struct uni_simd_kernel_t uni_simd_kernel_t;

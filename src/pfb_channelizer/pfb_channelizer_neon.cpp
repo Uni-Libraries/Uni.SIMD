@@ -93,10 +93,14 @@ void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& bl
             }
             const float32x4_t natural_re = reverse_lanes(accumulated_re);
             const float32x4_t natural_im = reverse_lanes(accumulated_im);
-            const float32x4_t transformed_re =
-                vfmsq_f32(vmulq_f32(natural_re, rotation_re), natural_im, rotation_im);
-            const float32x4_t transformed_im =
-                vfmaq_f32(vmulq_f32(natural_im, rotation_re), natural_re, rotation_im);
+            float32x4_t transformed_re = natural_re;
+            float32x4_t transformed_im = natural_im;
+            if (!direct) {
+                transformed_re =
+                    vfmsq_f32(vmulq_f32(natural_re, rotation_re), natural_im, rotation_im);
+                transformed_im =
+                    vfmaq_f32(vmulq_f32(natural_im, rotation_re), natural_re, rotation_im);
+            }
             if (direct) {
                 direct_re[hop] = vfmaq_f32(direct_re[hop], transformed_re, weight_re);
                 direct_re[hop] = vfmsq_f32(direct_re[hop], transformed_im, weight_im);

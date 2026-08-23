@@ -268,14 +268,32 @@ void test_dispatch(const uni::simd::Context& generic) {
     assert(reference.backend == uni::simd::Backend::generic);
     constexpr std::array<std::size_t, 9U> splits{1U, 2U, 3U, 4U, 5U, 7U, 17U, 31U, 11U};
 
-    for (const auto backend : {uni::simd::Backend::avx2_fma, uni::simd::Backend::neon}) {
+    for (const auto backend : {uni::simd::Backend::avx2_fma, uni::simd::Backend::avx512,
+                               uni::simd::Backend::neon}) {
         const auto context = uni::simd::create_context({.backend = backend});
         if (!context) {
             assert(context.error() == uni::simd::Result::unsupported_backend);
             continue;
         }
         const auto actual = run(*context, accelerated, input);
-        assert(actual.backend == backend);
+        if (backend == uni::simd::Backend::avx512) {
+            assert(actual.backend == uni::simd::Backend::avx2_fma ||
+                   actual.backend == uni::simd::Backend::generic);
+        } else {
+            assert(actual.backend == backend);
+        }
+        const bool avx512_pfb_available = backend != uni::simd::Backend::avx512 ||
+                                          actual.backend == uni::simd::Backend::avx2_fma;
+        const auto resolved_backend_for = [&](const std::size_t bin_count) {
+            if (backend != uni::simd::Backend::avx512) {
+                return backend;
+            }
+            if (!avx512_pfb_available) {
+                return uni::simd::Backend::generic;
+            }
+            return bin_count == 32U ? uni::simd::Backend::avx512
+                                    : uni::simd::Backend::avx2_fma;
+        };
         compare_runs(reference, actual);
         const auto split = run(*context, accelerated, input, splits);
         compare_runs(actual, split);
@@ -283,7 +301,7 @@ void test_dispatch(const uni::simd::Context& generic) {
         const auto compare_accelerated = [&](const uni::simd::PfbChannelizerConfig& config) {
             const auto generic_result = run(generic, config, input);
             const auto accelerated_result = run(*context, config, input);
-            assert(accelerated_result.backend == backend);
+            assert(accelerated_result.backend == resolved_backend_for(config.bin_count));
             compare_runs(generic_result, accelerated_result);
             const auto fragmented = run(*context, config, input, splits);
             compare_runs(accelerated_result, fragmented);
@@ -332,8 +350,21 @@ void test_dispatch(const uni::simd::Context& generic) {
                 .grid_offset = uni::simd::PfbGridOffset::integer_bins,
                 .taps = matrix_taps};
             const auto discarded = run(*context, no_outputs, input, splits);
-            assert(discarded.backend == backend && discarded.outputs.empty());
+            assert(discarded.backend == resolved_backend_for(bin_count) && discarded.outputs.empty());
         }
+
+        const auto long_input = make_input(5003U);
+        const auto long_taps = make_taps(uni::simd::pfb_channelizer_max_taps);
+        constexpr std::array<std::int32_t, 1U> long_bin{15};
+        const uni::simd::PfbChannelizerConfig long_config{
+            .bin_count = 32U, .decimation = 16U,
+            .grid_offset = uni::simd::PfbGridOffset::half_bins,
+            .taps = long_taps, .logical_bins = long_bin};
+        const auto long_reference = run(generic, long_config, long_input);
+        const auto long_accelerated = run(*context, long_config, long_input);
+        assert(long_accelerated.backend == resolved_backend_for(32U));
+        compare_runs(long_reference, long_accelerated);
+        compare_runs(long_accelerated, run(*context, long_config, long_input, splits));
 
         for (const std::size_t tap_count : {168U, 170U}) {
             const auto general_taps = make_taps(tap_count);

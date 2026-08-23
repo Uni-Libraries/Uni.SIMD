@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <new>
 #include <span>
 #include <vector>
 
@@ -17,6 +18,33 @@ namespace uni::simd::detail {
 using PfbChannelizerFn = std::size_t (*)(struct PfbChannelizerData&,
                                          const PfbChannelizerBlock&) noexcept;
 using PfbChannelizerSupportFn = bool (*)(const struct PfbChannelizerData&) noexcept;
+
+template <typename Value>
+class PfbAlignedAllocator {
+public:
+    using value_type = Value;
+
+    [[nodiscard]] Value* allocate(const std::size_t count) {
+        return static_cast<Value*>(::operator new(count * sizeof(Value), std::align_val_t{64U}));
+    }
+
+    void deallocate(Value* const pointer, std::size_t) noexcept {
+        ::operator delete(pointer, std::align_val_t{64U});
+    }
+
+    template <typename Other>
+    struct rebind {
+        using other = PfbAlignedAllocator<Other>;
+    };
+};
+
+template <typename Left, typename Right>
+[[nodiscard]] constexpr bool operator==(const PfbAlignedAllocator<Left>&,
+                                        const PfbAlignedAllocator<Right>&) noexcept {
+    return true;
+}
+
+using PfbAlignedFloats = std::vector<float, PfbAlignedAllocator<float>>;
 
 struct PfbChannelizerData final {
     std::size_t bins = 0U;
@@ -30,14 +58,14 @@ struct PfbChannelizerData final {
     PfbChannelizerFn process = nullptr;
     std::vector<std::int32_t> selected_bins;
     std::vector<std::size_t> selected_fft_bins;
-    std::vector<float> reversed_coefficients;
-    std::array<float, pfb_channelizer_max_bins> branch_rotation_re{};
-    std::array<float, pfb_channelizer_max_bins> branch_rotation_im{};
-    std::vector<float> post_phase_re;
-    std::vector<float> post_phase_im;
-    std::vector<float> selected_transform_re;
-    std::vector<float> selected_transform_im;
-    std::vector<float> history;
+    PfbAlignedFloats reversed_coefficients;
+    alignas(64) std::array<float, pfb_channelizer_max_bins> branch_rotation_re{};
+    alignas(64) std::array<float, pfb_channelizer_max_bins> branch_rotation_im{};
+    PfbAlignedFloats post_phase_re;
+    PfbAlignedFloats post_phase_im;
+    PfbAlignedFloats selected_transform_re;
+    PfbAlignedFloats selected_transform_im;
+    PfbAlignedFloats history;
     std::size_t cursor = 0U;
     std::size_t decimation_phase = 0U;
     std::size_t post_phase = 0U;
@@ -102,15 +130,20 @@ struct PfbChannelizerAccess final {
 
 [[nodiscard]] std::expected<std::unique_ptr<PfbChannelizerData>, Result>
 make_pfb_channelizer_data(const PfbChannelizerConfig& config, PfbChannelizerFn candidate,
-                          PfbChannelizerSupportFn supports, Backend backend) noexcept;
+                          PfbChannelizerSupportFn supports, Backend backend,
+                          PfbChannelizerFn fallback, PfbChannelizerSupportFn fallback_supports,
+                          Backend fallback_backend) noexcept;
 
 [[nodiscard]] std::size_t PfbChannelizer_generic(PfbChannelizerData& data,
                                                  const PfbChannelizerBlock& block) noexcept;
 [[nodiscard]] std::size_t PfbChannelizer_avx2fma(PfbChannelizerData& data,
                                                  const PfbChannelizerBlock& block) noexcept;
+[[nodiscard]] std::size_t PfbChannelizer_avx512(PfbChannelizerData& data,
+                                                const PfbChannelizerBlock& block) noexcept;
 [[nodiscard]] std::size_t PfbChannelizer_neon(PfbChannelizerData& data,
                                                const PfbChannelizerBlock& block) noexcept;
 [[nodiscard]] bool PfbChannelizer_supports_all(const PfbChannelizerData&) noexcept;
+[[nodiscard]] bool PfbChannelizer_supports_avx512(const PfbChannelizerData&) noexcept;
 
 [[nodiscard]] inline std::size_t pfb_output_count_unchecked(const PfbChannelizerData& data,
                                                              const std::size_t input_count) noexcept {
@@ -200,7 +233,16 @@ template <typename ProcessBatch>
     std::array<std::size_t, 4U> queued_cursors{};
     std::array<std::size_t, 4U> queued_phases{};
 
-    for (std::size_t input_index = 0U; input_index < block.input.size() / 2U; ++input_index) {
+    const std::size_t input_count = block.input.size() / 2U;
+    if (selected_count == 0U) {
+        const std::size_t produced = pfb_output_count_unchecked(data, input_count);
+        PfbChannelizerAccess::set_cursor(data, (cursor + input_count) & history_mask);
+        PfbChannelizerAccess::set_decimation_phase(data, (decimation_phase + input_count) % decimation);
+        PfbChannelizerAccess::set_post_phase(data, (post_phase + produced) % phase_period);
+        return produced;
+    }
+
+    for (std::size_t input_index = 0U; input_index < input_count; ++input_index) {
         const float sample_re = block.input[2U * input_index];
         const float sample_im = block.input[2U * input_index + 1U];
         history_i[cursor] = sample_re;
@@ -209,17 +251,13 @@ template <typename ProcessBatch>
         history_q[cursor + history_size] = sample_im;
 
         if (decimation_phase == 0U) {
-            if (selected_count == 0U) {
-                ++produced;
-            } else {
-                queued_cursors[queued] = cursor;
-                queued_phases[queued] = post_phase;
-                ++queued;
-                if (queued == batch_limit) {
-                    process_batch(queued_cursors.data(), queued_phases.data(), queued, produced);
-                    produced += queued;
-                    queued = 0U;
-                }
+            queued_cursors[queued] = cursor;
+            queued_phases[queued] = post_phase;
+            ++queued;
+            if (queued == batch_limit) {
+                process_batch(queued_cursors.data(), queued_phases.data(), queued, produced);
+                produced += queued;
+                queued = 0U;
             }
             post_phase = post_phase + 1U == phase_period ? 0U : post_phase + 1U;
         }

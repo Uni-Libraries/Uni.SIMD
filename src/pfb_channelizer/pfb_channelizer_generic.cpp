@@ -25,11 +25,20 @@ std::size_t PfbChannelizer_generic(PfbChannelizerData& data, const PfbChannelize
     std::size_t decimation_phase = PfbChannelizerAccess::decimation_phase(state);
     std::size_t post_phase = PfbChannelizerAccess::post_phase(state);
     std::size_t produced = 0U;
+    const std::size_t input_count = block.input.size() / 2U;
+
+    if (selected_count == 0U) {
+        produced = pfb_output_count_unchecked(data, input_count);
+        PfbChannelizerAccess::set_cursor(state, (cursor + input_count) & history_mask);
+        PfbChannelizerAccess::set_decimation_phase(state, (decimation_phase + input_count) % decimation);
+        PfbChannelizerAccess::set_post_phase(state, (post_phase + produced) % phase_period);
+        return produced;
+    }
 
     alignas(64) std::array<float, pfb_channelizer_max_bins> fft_re{};
     alignas(64) std::array<float, pfb_channelizer_max_bins> fft_im{};
 
-    for (std::size_t input_index = 0U; input_index < block.input.size() / 2U; ++input_index) {
+    for (std::size_t input_index = 0U; input_index < input_count; ++input_index) {
         const float sample_re = block.input[2U * input_index];
         const float sample_im = block.input[2U * input_index + 1U];
         history_i[cursor] = sample_re;
@@ -50,17 +59,20 @@ std::size_t PfbChannelizer_generic(PfbChannelizerData& data, const PfbChannelize
                         fft_im[branch] += history_q[first_sample + lane] * row_coefficients[lane];
                     }
                 }
-                for (std::size_t branch = 0U; branch < bins; ++branch) {
-                    const float accumulator_re = fft_re[branch];
-                    const float accumulator_im = fft_im[branch];
-                    fft_re[branch] = accumulator_re * rotation_re[branch] - accumulator_im * rotation_im[branch];
-                    fft_im[branch] = accumulator_re * rotation_im[branch] + accumulator_im * rotation_re[branch];
-                }
-
                 if (selected_count == 1U) {
                     pfb_emit_direct_output(plan, block, produced, post_phase,
                                            fft_re.data(), fft_im.data());
                 } else {
+                    if (plan.grid_offset() == PfbGridOffset::half_bins) {
+                        for (std::size_t branch = 0U; branch < bins; ++branch) {
+                            const float accumulator_re = fft_re[branch];
+                            const float accumulator_im = fft_im[branch];
+                            fft_re[branch] = accumulator_re * rotation_re[branch] -
+                                             accumulator_im * rotation_im[branch];
+                            fft_im[branch] = accumulator_re * rotation_im[branch] +
+                                             accumulator_im * rotation_re[branch];
+                        }
+                    }
                     Ifft_generic(fft_re.data(), fft_im.data(), bins, 1U, bins);
                     pfb_emit_transformed_outputs(plan, block, produced, post_phase,
                                                  fft_re.data(), fft_im.data());

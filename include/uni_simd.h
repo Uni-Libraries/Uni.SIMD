@@ -48,7 +48,11 @@ UNI_SIMD_API uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(uni_simd_ke
  * created.
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set(
-    uni_simd_kernel_t* kernel, uni_simd_param_id param, uni_simd_param_val val);
+    uni_simd_kernel_t* kernel, uni_simd_param_t param);
+
+/** Atomically applies a parameter batch under one kernel lock. */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set_many(
+    uni_simd_kernel_t* kernel, uni_simd_param_t* params, size_t param_count);
 
 /** Releases a kernel instance. Passing NULL is a successful no-op. */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kernel_t* kernel);
@@ -93,6 +97,14 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kerne
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(
     uni_simd_kernel_t* kernel, const void* input, void* output);
+
+/**
+ * Resets an initialized PFB kernel. Returns INVALID_ARGUMENT for other kernels
+ * and INVALID_STATE before PFB streaming state has been created. A pending
+ * legacy RESET parameter is cleared; other one-shot parameters are unchanged.
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(
+    uni_simd_kernel_t* kernel);
 
 #ifdef __cplusplus
 }

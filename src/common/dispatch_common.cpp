@@ -223,6 +223,16 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
 #if UNI_SIMD_HAVE_AVX512F
     const bool allow_avx512 = requested != Backend::automatic || !options.prefer_energy_efficiency;
     if (allow_avx512 && caps.avx512f && allows(requested, Backend::avx512)) {
+#if UNI_SIMD_HAVE_AVX2_FMA
+        if (requested == Backend::avx512 && caps.avx2 && caps.fma) {
+            context.pfb_channelizer_fallback_ = context.pfb_channelizer_;
+            context.pfb_channelizer_fallback_support_ = context.pfb_channelizer_support_;
+            context.pfb_channelizer_fallback_backend_ = context.pfb_channelizer_backend_;
+            context.pfb_channelizer_ = &kernels::PfbChannelizer_avx512;
+            context.pfb_channelizer_support_ = &kernels::PfbChannelizer_supports_avx512;
+            context.pfb_channelizer_backend_ = Backend::avx512;
+        }
+#endif
         context.invert_lsb_ = &kernels::Invert1_avx512f;
         context.invert_bytes_ = &kernels::Invert8_avx512f;
         context.backends_[static_cast<std::size_t>(Kernel::invert_lsb)] = Backend::avx512;
@@ -502,7 +512,8 @@ std::expected<PfbChannelizer, Result>
 Context::make_pfb_channelizer(const PfbChannelizerConfig& config) const noexcept {
     auto data = detail::make_pfb_channelizer_data(
         config, pfb_channelizer_, pfb_channelizer_support_,
-        pfb_channelizer_backend_);
+        pfb_channelizer_backend_, pfb_channelizer_fallback_,
+        pfb_channelizer_fallback_support_, pfb_channelizer_fallback_backend_);
     if (!data) {
         return std::unexpected(data.error());
     }

@@ -146,18 +146,18 @@ namespace {
            id == UNI_SIMD_PARAM_LOGICAL_BINS || id == UNI_SIMD_PARAM_LOGICAL_BIN_COUNT;
 }
 
-[[nodiscard]] uni_simd_result_e set_parameter(uni_simd_kernel_t& kernel,
+[[nodiscard]] uni_simd_result_e set_parameter(const uni_simd_kernel_e kernel,
+                                              const bool pfb_initialized,
+                                              ParsedParams& params,
                                               const uni_simd_param_id id,
                                               const uni_simd_param_val value) noexcept {
     const auto index = static_cast<std::size_t>(id);
-    if (index == 0U || index >= kernel.params.present.size() || !parameter_allowed(kernel.id, index)) {
+    if (index == 0U || index >= params.present.size() || !parameter_allowed(kernel, index)) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
-    if (kernel.pfb && is_pfb_creation_parameter(id)) {
+    if (pfb_initialized && is_pfb_creation_parameter(id)) {
         return UNI_SIMD_RESULT_INVALID_STATE;
     }
-
-    auto& params = kernel.params;
     switch (id) {
     case UNI_SIMD_PARAM_BACKEND:
         if (value.u32 > UNI_SIMD_BACKEND_AARCH64_NEON) {
@@ -485,18 +485,18 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
 
 [[nodiscard]] uni_simd_result_e execute_pfb(uni_simd_kernel_t& kernel,
                                             const void* const input, void* const output,
-                                            const uni::simd::Context& context) {
+                                            const uni::simd::Context* const context) {
     auto& params = kernel.params;
     std::optional<uni::simd::PfbChannelizer> pending_state;
     uni::simd::PfbChannelizer* active = kernel.pfb ? &*kernel.pfb : nullptr;
     if (active == nullptr) {
-        if (!params.has_bin_count || !params.has_decimation || !params.has_grid_offset || !params.has_taps ||
-            !params.has_tap_count || !params.has_logical_bins || !params.has_logical_bin_count ||
-            (params.tap_count != 0U && params.taps == nullptr) ||
+        if (context == nullptr || !params.has_bin_count || !params.has_decimation || !params.has_grid_offset ||
+            !params.has_taps || !params.has_tap_count || !params.has_logical_bins ||
+            !params.has_logical_bin_count || (params.tap_count != 0U && params.taps == nullptr) ||
             (params.logical_bin_count != 0U && params.logical_bins == nullptr)) {
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
-        auto pfb = context.make_pfb_channelizer({
+        auto pfb = context->make_pfb_channelizer({
             .bin_count = params.bin_count,
             .decimation = params.decimation,
             .grid_offset = static_cast<uni::simd::PfbGridOffset>(params.grid_offset),
@@ -585,23 +585,28 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
 
     auto& destinations = *static_cast<uni_simd_buffer_array_t*>(output);
     if (destinations.count != active->logical_bins().size() ||
-        (destinations.count != 0U && destinations.buffers == nullptr) ||
-        *expected > std::numeric_limits<std::size_t>::max() / (2U * sizeof(float))) {
+        (destinations.count != 0U && destinations.buffers == nullptr)) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
     for (std::size_t index = 0U; index < destinations.count; ++index) {
         const auto& destination = destinations.buffers[index];
-        if (!valid_write_buffer(destination) || destination.count < *expected) {
+        if (!valid_write_buffer(destination) ||
+            destination.count > std::numeric_limits<std::size_t>::max() / (2U * sizeof(float))) {
             return UNI_SIMD_RESULT_INVALID_SIZE;
         }
-        if (overlaps(src.data, src.count * 2U * sizeof(float),
-                     destination.data, *expected * 2U * sizeof(float))) {
-            return UNI_SIMD_RESULT_OVERLAPPING_BUFFERS;
-        }
-        for (std::size_t previous = 0U; previous < index; ++previous) {
-            if (overlaps(destinations.buffers[previous].data, *expected * 2U * sizeof(float),
+        if (params.reset) {
+            if (destination.count < *expected) {
+                return UNI_SIMD_RESULT_INVALID_SIZE;
+            }
+            if (overlaps(src.data, src.count * 2U * sizeof(float),
                          destination.data, *expected * 2U * sizeof(float))) {
                 return UNI_SIMD_RESULT_OVERLAPPING_BUFFERS;
+            }
+            for (std::size_t previous = 0U; previous < index; ++previous) {
+                if (overlaps(destinations.buffers[previous].data, *expected * 2U * sizeof(float),
+                             destination.data, *expected * 2U * sizeof(float))) {
+                    return UNI_SIMD_RESULT_OVERLAPPING_BUFFERS;
+                }
             }
         }
     }
@@ -617,7 +622,8 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     };
     for (std::size_t output_index = 0U; output_index < destinations.count; ++output_index) {
         block.outputs[output_index] = {
-            static_cast<float*>(destinations.buffers[output_index].data), *expected * 2U};
+            static_cast<float*>(destinations.buffers[output_index].data),
+            destinations.buffers[output_index].count * 2U};
     }
     const auto produced = active->process(block);
     if (!produced) {
@@ -675,8 +681,7 @@ uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(const uni_simd_kernel_e 
 }
 
 uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set(uni_simd_kernel_t* const kernel,
-                                                          const uni_simd_param_id param,
-                                                          const uni_simd_param_val val) {
+                                                           const uni_simd_param_t param) {
     try {
         auto& active = runtime();
         const std::shared_lock lock{active.mutex};
@@ -687,7 +692,65 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set(uni_simd_kernel_t* con
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
         const std::lock_guard kernel_lock{kernel->mutex};
-        return set_parameter(*kernel, param, val);
+        ParsedParams pending = kernel->params;
+        const auto result = set_parameter(kernel->id, kernel->pfb.has_value(), pending,
+                                          param.id, param.value);
+        if (result == UNI_SIMD_RESULT_SUCCESS) {
+            kernel->params = std::move(pending);
+        }
+        return result;
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set_many(
+    uni_simd_kernel_t* const kernel, uni_simd_param_t* const params,
+    const std::size_t param_count) {
+    try {
+        auto& active = runtime();
+        const std::shared_lock lock{active.mutex};
+        if (!active.initialized) {
+            return UNI_SIMD_RESULT_NOT_INITIALIZED;
+        }
+        if (kernel == nullptr || (param_count != 0U && params == nullptr)) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        const std::lock_guard kernel_lock{kernel->mutex};
+        ParsedParams pending = kernel->params;
+        for (std::size_t index = 0U; index < param_count; ++index) {
+            const auto result = set_parameter(kernel->id, kernel->pfb.has_value(), pending,
+                                              params[index].id, params[index].value);
+            if (result != UNI_SIMD_RESULT_SUCCESS) {
+                return result;
+            }
+        }
+        kernel->params = std::move(pending);
+        return UNI_SIMD_RESULT_SUCCESS;
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(uni_simd_kernel_t* const kernel) {
+    try {
+        auto& active = runtime();
+        const std::shared_lock lock{active.mutex};
+        if (!active.initialized) {
+            return UNI_SIMD_RESULT_NOT_INITIALIZED;
+        }
+        if (kernel == nullptr) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        const std::lock_guard kernel_lock{kernel->mutex};
+        if (kernel->id != UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (!kernel->pfb) {
+            return UNI_SIMD_RESULT_INVALID_STATE;
+        }
+        kernel->params.reset = false;
+        return to_c(kernel->pfb->reset());
     } catch (...) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
@@ -727,14 +790,18 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(uni_simd_kernel_t* const
                 params.reset = false;
             }
         } command_reset{kernel->params};
-        uni_simd_result_e context_error = UNI_SIMD_RESULT_SUCCESS;
-        const auto* const context = select_context(kernel->params, context_error);
-        if (context == nullptr) {
-            return context_error;
+
+        const uni::simd::Context* context = nullptr;
+        if (kernel->id != UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32 || !kernel->pfb) {
+            uni_simd_result_e context_error = UNI_SIMD_RESULT_SUCCESS;
+            context = select_context(kernel->params, context_error);
+            if (context == nullptr) {
+                return context_error;
+            }
         }
 
         if (kernel->id == UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
-            return execute_pfb(*kernel, input, output, *context);
+            return execute_pfb(*kernel, input, output, context);
         }
         return execute_stateless(kernel->id, input, output, kernel->params, *context);
     } catch (const std::bad_alloc&) {
