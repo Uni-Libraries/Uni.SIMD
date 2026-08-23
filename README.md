@@ -167,6 +167,7 @@ instance for concurrent work; separate instances may run concurrently.
 ./build/src_benchmark/uni_simd_benchmark
 ./build/src_benchmark/uni_simd_benchmark --thorough
 ./build/src_benchmark/uni_simd_benchmark --kernel pfb
+./build/src_benchmark/uni_simd_benchmark --kernel pfb_cf32_8_four --backend avx2-fma
 ```
 
 The default quick run uses three iterations, one warmup batch, and 1 ms samples;

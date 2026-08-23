@@ -377,6 +377,20 @@ void test_dispatch(const uni::simd::Context& generic) {
         compare_accelerated({.bin_count = 8U, .decimation = 4U,
                              .grid_offset = uni::simd::PfbGridOffset::integer_bins,
                              .taps = maximum_eight_taps, .logical_bins = all_bins});
+        compare_accelerated({.bin_count = 8U, .decimation = 4U,
+                             .grid_offset = uni::simd::PfbGridOffset::half_bins,
+                             .taps = maximum_eight_taps, .logical_bins = all_bins});
+
+        constexpr std::array<std::int32_t, 8U> permuted_bins{3, -4, 1, -2, 0, 2, -1, -3};
+        const auto count_taps = make_taps(170U);
+        for (std::size_t selected_count = 2U; selected_count <= permuted_bins.size(); ++selected_count) {
+            for (const auto grid : {uni::simd::PfbGridOffset::integer_bins,
+                                    uni::simd::PfbGridOffset::half_bins}) {
+                compare_accelerated({.bin_count = 8U, .decimation = 4U,
+                                     .grid_offset = grid, .taps = count_taps,
+                                     .logical_bins = {permuted_bins.data(), selected_count}});
+            }
+        }
 
         auto reset_channelizer = context->make_pfb_channelizer(accelerated);
         assert(reset_channelizer.has_value());

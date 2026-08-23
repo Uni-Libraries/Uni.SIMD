@@ -212,6 +212,7 @@ struct Config {
     std::size_t sample_milliseconds = 1U;
     std::string_view preset = "quick";
     std::string_view kernel_filter;
+    std::optional<uni_simd_backend_e> backend_filter;
 };
 
 struct Statistics {
@@ -312,8 +313,27 @@ public:
 }
 
 void print_usage(const std::string_view program) {
-    fmt::print("Usage: {} [--thorough] [--iterations N] [--warmup N] [--sample-ms N] [--kernel TEXT]\n",
+    fmt::print("Usage: {} [--thorough] [--iterations N] [--warmup N] [--sample-ms N] "
+               "[--kernel TEXT] [--backend NAME]\n",
                program);
+}
+
+[[nodiscard]] std::optional<uni_simd_backend_e> parse_backend(const std::string_view value) noexcept {
+    constexpr std::array names{
+        std::pair{std::string_view{"automatic"}, UNI_SIMD_BACKEND_AUTOMATIC},
+        std::pair{std::string_view{"generic"}, UNI_SIMD_BACKEND_GENERIC},
+        std::pair{std::string_view{"sse2"}, UNI_SIMD_BACKEND_X86_SSE2},
+        std::pair{std::string_view{"avx2"}, UNI_SIMD_BACKEND_X86_AVX2},
+        std::pair{std::string_view{"avx2-fma"}, UNI_SIMD_BACKEND_X86_AVX2_FMA},
+        std::pair{std::string_view{"avx512"}, UNI_SIMD_BACKEND_X86_AVX512},
+        std::pair{std::string_view{"neon"}, UNI_SIMD_BACKEND_AARCH64_NEON},
+    };
+    for (const auto& [name, backend] : names) {
+        if (value == name) {
+            return backend;
+        }
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] ParseResult parse_arguments(const int argc, char** argv, Config& config) {
@@ -335,6 +355,18 @@ void print_usage(const std::string_view program) {
                 return ParseResult::error;
             }
             config.kernel_filter = argv[index];
+            continue;
+        }
+        if (argument == "--backend") {
+            if (++index == argc) {
+                std::cerr << "Missing value for " << argument << '\n';
+                return ParseResult::error;
+            }
+            config.backend_filter = parse_backend(argv[index]);
+            if (!config.backend_filter) {
+                std::cerr << "Unknown backend: " << argv[index] << '\n';
+                return ParseResult::error;
+            }
             continue;
         }
         if (argument != "--iterations" && argument != "--samples" && argument != "--warmup" &&
@@ -1214,6 +1246,9 @@ void run_kernel(const KernelDescription& description, const Config& config, cons
     std::array<bool, kBackendSlots> measured{};
     std::optional<double> generic_nanoseconds;
     for (const uni_simd_backend_e requested : kCandidateBackends) {
+        if (config.backend_filter && requested != *config.backend_filter) {
+            continue;
+        }
         const uni_simd_result_e configuration_result = workload.configure(requested);
         if (configuration_result == UNI_SIMD_RESULT_UNSUPPORTED_BACKEND) {
             continue;
