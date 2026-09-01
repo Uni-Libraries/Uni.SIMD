@@ -1,6 +1,8 @@
 #include <uni_simd.h>
 
 #include "common/api_internal.hpp"
+#include "costas_loop/costas_loop_internal.hpp"
+#include "qpsk_carrier_analyzer/qpsk_carrier_analyzer_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -65,7 +67,7 @@ struct ContextCache final {
 }
 
 struct ParsedParams final {
-    std::array<bool, UNI_SIMD_PARAM_RESET + 1U> present{};
+    std::array<bool, UNI_SIMD_PARAM_CONFIG + 1U> present{};
     uni_simd_backend_e backend = UNI_SIMD_BACKEND_AUTOMATIC;
     uni_simd_math_mode_e math_mode = UNI_SIMD_MATH_FAST;
     bool prefer_energy_efficiency = false;
@@ -83,6 +85,7 @@ struct ParsedParams final {
     std::size_t logical_bin_count = 0U;
     bool query_output_count = false;
     bool reset = false;
+    const void* config = nullptr;
     bool has_rbw_hz = false;
     bool has_taps = false;
     bool has_tap_count = false;
@@ -92,6 +95,7 @@ struct ParsedParams final {
     bool has_grid_offset = false;
     bool has_logical_bins = false;
     bool has_logical_bin_count = false;
+    bool has_config = false;
     uni_simd_backend_e* resolved_backend = nullptr;
     std::size_t* output_count = nullptr;
 };
@@ -102,6 +106,8 @@ struct uni_simd_kernel_t final {
     uni_simd_kernel_e id;
     ParsedParams params;
     std::optional<uni::simd::PfbChannelizer> pfb;
+    std::optional<uni_simd_qpsk_costas4_t> costas4;
+    std::optional<uni_simd_qpsk_carrier_analyzer_t> carrier_analyzer;
 };
 
 namespace {
@@ -131,21 +137,35 @@ namespace {
     case UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32:
         return id >= UNI_SIMD_PARAM_TAPS && id <= UNI_SIMD_PARAM_RESET &&
                id != UNI_SIMD_PARAM_CENTER_TAP;
+    case UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32:
+    case UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32:
+        return id == UNI_SIMD_PARAM_CONFIG;
     default:
         return false;
     }
 }
 
-[[nodiscard]] bool is_pfb_creation_parameter(const uni_simd_param_id id) noexcept {
-    return id == UNI_SIMD_PARAM_BACKEND || id == UNI_SIMD_PARAM_MATH_MODE ||
-           id == UNI_SIMD_PARAM_PREFER_ENERGY_EFFICIENCY || id == UNI_SIMD_PARAM_TAPS ||
-           id == UNI_SIMD_PARAM_TAP_COUNT || id == UNI_SIMD_PARAM_BIN_COUNT ||
-           id == UNI_SIMD_PARAM_DECIMATION || id == UNI_SIMD_PARAM_GRID_OFFSET ||
-           id == UNI_SIMD_PARAM_LOGICAL_BINS || id == UNI_SIMD_PARAM_LOGICAL_BIN_COUNT;
+[[nodiscard]] bool state_created(const uni_simd_kernel_t& kernel) noexcept {
+    return kernel.pfb.has_value() || kernel.costas4.has_value() || kernel.carrier_analyzer.has_value();
+}
+
+[[nodiscard]] bool is_creation_parameter(const uni_simd_kernel_e kernel,
+                                         const uni_simd_param_id id) noexcept {
+    if (id == UNI_SIMD_PARAM_BACKEND || id == UNI_SIMD_PARAM_MATH_MODE ||
+        id == UNI_SIMD_PARAM_PREFER_ENERGY_EFFICIENCY) {
+        return true;
+    }
+    if (kernel == UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
+        return id == UNI_SIMD_PARAM_TAPS || id == UNI_SIMD_PARAM_TAP_COUNT ||
+               id == UNI_SIMD_PARAM_BIN_COUNT || id == UNI_SIMD_PARAM_DECIMATION ||
+               id == UNI_SIMD_PARAM_GRID_OFFSET || id == UNI_SIMD_PARAM_LOGICAL_BINS ||
+               id == UNI_SIMD_PARAM_LOGICAL_BIN_COUNT;
+    }
+    return id == UNI_SIMD_PARAM_CONFIG;
 }
 
 [[nodiscard]] uni_simd_result_e set_parameter(const uni_simd_kernel_e kernel,
-                                              const bool pfb_initialized,
+                                               const bool initialized,
                                               ParsedParams& params,
                                               const uni_simd_param_id id,
                                               const uni_simd_param_val value) noexcept {
@@ -153,7 +173,7 @@ namespace {
     if (index == 0U || index >= params.present.size() || !parameter_allowed(kernel, index)) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
-    if (pfb_initialized && is_pfb_creation_parameter(id)) {
+    if (initialized && is_creation_parameter(kernel, id)) {
         return UNI_SIMD_RESULT_INVALID_STATE;
     }
     switch (id) {
@@ -241,6 +261,10 @@ namespace {
         }
         params.reset = value.u32 != 0U;
         break;
+    case UNI_SIMD_PARAM_CONFIG:
+        params.config = value.const_pointer;
+        params.has_config = true;
+        break;
     default:
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
@@ -312,6 +336,11 @@ namespace {
     const auto right_begin = reinterpret_cast<std::uintptr_t>(right);
     return left_begin <= right_begin ? right_begin - left_begin < left_bytes
                                      : left_begin - right_begin < right_bytes;
+}
+
+template <typename T>
+[[nodiscard]] bool naturally_aligned(const void* const pointer) noexcept {
+    return reinterpret_cast<std::uintptr_t>(pointer) % alignof(T) == 0U;
 }
 
 void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend) noexcept {
@@ -633,6 +662,82 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     return complete_success();
 }
 
+[[nodiscard]] uni_simd_result_e execute_costas4(uni_simd_kernel_t& kernel,
+                                                const void* const input,
+                                                void* const output) noexcept {
+    if (input == nullptr || !naturally_aligned<uni_simd_qpsk_costas4_block_t>(input) ||
+        (output != nullptr && !naturally_aligned<uni_simd_qpsk_costas4_state_t>(output)) ||
+        !kernel.params.has_config || kernel.params.config == nullptr ||
+        !naturally_aligned<uni_simd_qpsk_costas4_config_t>(kernel.params.config)) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    std::optional<uni_simd_qpsk_costas4_t> pending;
+    auto* active = kernel.costas4 ? &*kernel.costas4 : nullptr;
+    if (active == nullptr) {
+        pending.emplace();
+        const auto result = uni::simd::kernels::QpskCostas4Initialize(
+            *pending,
+            *static_cast<const uni_simd_qpsk_costas4_config_t*>(kernel.params.config),
+            kernel.params.backend,
+            kernel.params.math_mode);
+        if (result != UNI_SIMD_RESULT_SUCCESS) {
+            return result;
+        }
+        active = &*pending;
+    }
+    const auto block = *static_cast<const uni_simd_qpsk_costas4_block_t*>(input);
+    const auto result = uni::simd::kernels::QpskCostas4Execute(
+        *active,
+        block,
+        static_cast<uni_simd_qpsk_costas4_state_t*>(output));
+    if (result == UNI_SIMD_RESULT_SUCCESS) {
+        set_resolved_backend(kernel.params, static_cast<uni::simd::Backend>(active->backend));
+        if (pending) {
+            kernel.costas4.emplace(*pending);
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] uni_simd_result_e execute_carrier_analyzer(uni_simd_kernel_t& kernel,
+                                                         const void* const input,
+                                                         void* const output) noexcept {
+    if (input == nullptr || output == nullptr ||
+        !naturally_aligned<uni_simd_qpsk_carrier_analyzer_block_t>(input) ||
+        !naturally_aligned<uni_simd_qpsk_carrier_analyzer_result_t>(output) ||
+        !kernel.params.has_config || kernel.params.config == nullptr ||
+        !naturally_aligned<uni_simd_qpsk_carrier_analyzer_config_t>(kernel.params.config)) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    std::optional<uni_simd_qpsk_carrier_analyzer_t> pending;
+    auto* active = kernel.carrier_analyzer ? &*kernel.carrier_analyzer : nullptr;
+    if (active == nullptr) {
+        pending.emplace();
+        const auto result = uni::simd::kernels::QpskCarrierAnalyzerInitialize(
+            *pending,
+            *static_cast<const uni_simd_qpsk_carrier_analyzer_config_t*>(kernel.params.config),
+            kernel.params.backend,
+            kernel.params.math_mode,
+            kernel.params.prefer_energy_efficiency);
+        if (result != UNI_SIMD_RESULT_SUCCESS) {
+            return result;
+        }
+        active = &*pending;
+    }
+    const auto block = *static_cast<const uni_simd_qpsk_carrier_analyzer_block_t*>(input);
+    const auto result = uni::simd::kernels::QpskCarrierAnalyzerExecute(
+        *active,
+        block,
+        *static_cast<uni_simd_qpsk_carrier_analyzer_result_t*>(output));
+    if (result == UNI_SIMD_RESULT_SUCCESS) {
+        set_resolved_backend(kernel.params, static_cast<uni::simd::Backend>(active->backend));
+        if (pending) {
+            kernel.carrier_analyzer.emplace(*pending);
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 uni_simd_result_e UNI_SIMD_CALL uni_simd_initialize(void) {
@@ -665,7 +770,7 @@ uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(const uni_simd_kernel_e 
         auto& active = runtime();
         const std::lock_guard lock{active.mutex};
         if (!active.initialized.load(std::memory_order_relaxed) || kernel <= UNI_SIMD_KERNEL_UNKNOWN ||
-            kernel > UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
+            kernel > UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32) {
             return nullptr;
         }
         auto* const created = new (std::nothrow) uni_simd_kernel_t{.id = kernel};
@@ -687,7 +792,7 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set(uni_simd_kernel_t* con
                        : UNI_SIMD_RESULT_NOT_INITIALIZED;
         }
         ParsedParams pending = kernel->params;
-        const auto result = set_parameter(kernel->id, kernel->pfb.has_value(), pending,
+        const auto result = set_parameter(kernel->id, state_created(*kernel), pending,
                                           param.id, param.value);
         if (result == UNI_SIMD_RESULT_SUCCESS) {
             kernel->params = std::move(pending);
@@ -710,7 +815,7 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_param_set_many(
         }
         ParsedParams pending = kernel->params;
         for (std::size_t index = 0U; index < param_count; ++index) {
-            const auto result = set_parameter(kernel->id, kernel->pfb.has_value(), pending,
+            const auto result = set_parameter(kernel->id, state_created(*kernel), pending,
                                               params[index].id, params[index].value);
             if (result != UNI_SIMD_RESULT_SUCCESS) {
                 return result;
@@ -730,14 +835,24 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(uni_simd_kernel_t* const k
                        ? UNI_SIMD_RESULT_INVALID_ARGUMENT
                        : UNI_SIMD_RESULT_NOT_INITIALIZED;
         }
-        if (kernel->id != UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
+        switch (kernel->id) {
+        case UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32:
+            if (!kernel->pfb) {
+                return UNI_SIMD_RESULT_INVALID_STATE;
+            }
+            kernel->params.reset = false;
+            return to_c(kernel->pfb->reset());
+        case UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32:
+            return kernel->costas4
+                       ? uni::simd::kernels::QpskCostas4Reset(*kernel->costas4)
+                       : UNI_SIMD_RESULT_INVALID_STATE;
+        case UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32:
+            return kernel->carrier_analyzer
+                       ? uni::simd::kernels::QpskCarrierAnalyzerReset(*kernel->carrier_analyzer)
+                       : UNI_SIMD_RESULT_INVALID_STATE;
+        default:
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
-        if (!kernel->pfb) {
-            return UNI_SIMD_RESULT_INVALID_STATE;
-        }
-        kernel->params.reset = false;
-        return to_c(kernel->pfb->reset());
     } catch (...) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
@@ -785,6 +900,12 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(uni_simd_kernel_t* const
 
         if (kernel->id == UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
             return execute_pfb(*kernel, input, output, context);
+        }
+        if (kernel->id == UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32) {
+            return execute_costas4(*kernel, input, output);
+        }
+        if (kernel->id == UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32) {
+            return execute_carrier_analyzer(*kernel, input, output);
         }
         return execute_stateless(kernel->id, input, output, kernel->params, *context);
     } catch (const std::bad_alloc&) {

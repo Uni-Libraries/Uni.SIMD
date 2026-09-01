@@ -98,6 +98,23 @@ if(UNI_SIMD_BUILD_TESTS)
     target_include_directories(uni_simd_pfb_channelizer_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_features(uni_simd_pfb_channelizer_tests PRIVATE cxx_std_23)
     set(UNI_SIMD_TEST_TARGETS uni_simd_tests uni_simd_pfb_channelizer_tests)
+    add_executable(uni_simd_costas4_tests src_tests/test_costas4.cpp)
+    target_link_libraries(uni_simd_costas4_tests PRIVATE Uni::SIMD)
+    target_include_directories(uni_simd_costas4_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_compile_features(uni_simd_costas4_tests PRIVATE cxx_std_23)
+    list(APPEND UNI_SIMD_TEST_TARGETS uni_simd_costas4_tests)
+    add_test(NAME uni_simd_costas4_tests COMMAND uni_simd_costas4_tests)
+    add_executable(uni_simd_qpsk_carrier_analyzer_tests src_tests/test_qpsk_carrier_analyzer.cpp)
+    target_link_libraries(uni_simd_qpsk_carrier_analyzer_tests PRIVATE Uni::SIMD)
+    target_include_directories(uni_simd_qpsk_carrier_analyzer_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_compile_features(uni_simd_qpsk_carrier_analyzer_tests PRIVATE cxx_std_23)
+    list(APPEND UNI_SIMD_TEST_TARGETS uni_simd_qpsk_carrier_analyzer_tests)
+    add_test(NAME uni_simd_qpsk_carrier_analyzer_tests COMMAND uni_simd_qpsk_carrier_analyzer_tests)
     add_executable(uni_simd_ifft_tests src_tests/test_ifft_cf32.cpp)
     target_link_libraries(uni_simd_ifft_tests PRIVATE ${UNI_SIMD_INTERNAL_TARGET})
     target_include_directories(uni_simd_ifft_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

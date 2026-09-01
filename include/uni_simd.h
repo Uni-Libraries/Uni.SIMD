@@ -67,8 +67,8 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kerne
  * Common optional parameters are U32 BACKEND (default AUTOMATIC), U32
  * MATH_MODE (default FAST), U32 PREFER_ENERGY_EFFICIENCY (0 or 1), and POINTER
  * RESOLVED_BACKEND. The pointer receives the implementation that actually ran.
- * For PFB, creation parameters cannot be changed after its first successful
- * execution has created streaming state.
+ * Stateful-kernel creation parameters cannot be changed after the first
+ * successful execution has created state.
  *
  * Input/output descriptor types and kernel-specific parameters are documented
  * in uni_simd_kernels.h.
@@ -93,6 +93,16 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kerne
  *   next execution attempt. Reset and query cannot be combined.
  * - Destruction: release the kernel with uni_simd_kernel_free().
  *
+ * Costas/analyzer protocol:
+ * - Set CONST_POINTER CONFIG to the matching configuration descriptor before
+ *   first execution. The descriptor is copied when state is created.
+ * - Costas input points to uni_simd_qpsk_costas4_block_t; output may be NULL or
+ *   point to uni_simd_qpsk_costas4_state_t.
+ * - Analyzer input points to uni_simd_qpsk_carrier_analyzer_block_t and output
+ *   points to uni_simd_qpsk_carrier_analyzer_result_t.
+ * - uni_simd_kernel_reset() restores Costas initial state or clears analyzer
+ *   adjacency state.
+ *
  * Buffers are borrowed for the duration of the call and require their element
  * type's natural alignment, but no additional SIMD alignment. Except for COPY_U8 and
  * documented exact in-place kernels, active input and output ranges must not
@@ -104,8 +114,8 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(
     uni_simd_kernel_t* kernel, const void* input, void* output);
 
 /**
- * Resets an initialized PFB kernel. Returns INVALID_ARGUMENT for other kernels
- * and INVALID_STATE before PFB streaming state has been created. A pending
+ * Resets an initialized stateful kernel. Returns INVALID_ARGUMENT for stateless
+ * kernels and INVALID_STATE before state has been created. For PFB, a pending
  * legacy RESET parameter is cleared; other one-shot parameters are unchanged.
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(

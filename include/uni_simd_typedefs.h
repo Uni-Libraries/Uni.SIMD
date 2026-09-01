@@ -102,7 +102,12 @@ enum {
     /** U32 input boolean: query PFB output count without advancing state. */
     UNI_SIMD_PARAM_QUERY_OUTPUT_COUNT = 18,
     /** U32 input boolean: clear PFB streaming history before processing. */
-    UNI_SIMD_PARAM_RESET = 19
+    UNI_SIMD_PARAM_RESET = 19,
+    /**
+     * CONST_POINTER input: borrowed kernel-specific configuration descriptor.
+     * Stateful kernels copy it when their state is created by first execution.
+     */
+    UNI_SIMD_PARAM_CONFIG = 20
 };
 
 /** Number of adjacent floats used to store one interleaved complex sample: real, then imaginary. */
@@ -142,6 +147,82 @@ typedef struct uni_simd_split_cf32_t {
 
 /** Current value required in uni_simd_split_cf32_t::descriptor_size. */
 #define UNI_SIMD_SPLIT_CF32_DESCRIPTOR_SIZE sizeof(uni_simd_split_cf32_t)
+
+#define UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT 4U
+
+typedef struct uni_simd_qpsk_costas4_config_t {
+    size_t descriptor_size;
+    float alpha[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float beta[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float error_clip[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float initial_phase[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float initial_frequency[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+} uni_simd_qpsk_costas4_config_t;
+
+#define UNI_SIMD_QPSK_COSTAS4_CONFIG_DESCRIPTOR_SIZE sizeof(uni_simd_qpsk_costas4_config_t)
+
+typedef struct uni_simd_qpsk_costas4_block_t {
+    size_t descriptor_size;
+    float* channels[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    size_t sample_count;
+    float input_gain[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float frequency_limit[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    uint32_t frequency_override_mask;
+    float frequency_override[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+} uni_simd_qpsk_costas4_block_t;
+
+#define UNI_SIMD_QPSK_COSTAS4_BLOCK_DESCRIPTOR_SIZE sizeof(uni_simd_qpsk_costas4_block_t)
+
+typedef struct uni_simd_qpsk_costas4_state_t {
+    size_t descriptor_size;
+    float phase[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float phase_cos[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float phase_sin[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float frequency[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float last_error[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+} uni_simd_qpsk_costas4_state_t;
+
+#define UNI_SIMD_QPSK_COSTAS4_STATE_DESCRIPTOR_SIZE sizeof(uni_simd_qpsk_costas4_state_t)
+
+/** Configuration for the allocation-free QPSK carrier-statistics analysis call. */
+typedef struct uni_simd_qpsk_carrier_analyzer_config_t {
+    size_t descriptor_size;
+    /** A sample is valid for fourth-power statistics exactly when |x|^2 > magnitude_epsilon. */
+    float magnitude_epsilon;
+} uni_simd_qpsk_carrier_analyzer_config_t;
+
+#define UNI_SIMD_QPSK_CARRIER_ANALYZER_CONFIG_DESCRIPTOR_SIZE \
+    sizeof(uni_simd_qpsk_carrier_analyzer_config_t)
+
+/** One borrowed block of interleaved CF32 input: real, then imaginary. */
+typedef struct uni_simd_qpsk_carrier_analyzer_block_t {
+    size_t descriptor_size;
+    const float* samples;
+    size_t sample_count;
+} uni_simd_qpsk_carrier_analyzer_block_t;
+
+#define UNI_SIMD_QPSK_CARRIER_ANALYZER_BLOCK_DESCRIPTOR_SIZE \
+    sizeof(uni_simd_qpsk_carrier_analyzer_block_t)
+
+/**
+ * Unnormalized sums produced for one analyze call. Complex fields are stored
+ * as {real, imaginary}. The analyzer kernel documentation defines the exact
+ * equations and streaming-boundary behavior.
+ */
+typedef struct uni_simd_qpsk_carrier_analyzer_result_t {
+    size_t descriptor_size;
+    float fourth_sum[UNI_SIMD_CF32_COMPONENT_COUNT];
+    float adjacent_fourth_sum[UNI_SIMD_CF32_COMPONENT_COUNT];
+    float decision_sum[UNI_SIMD_CF32_COMPONENT_COUNT];
+    float input_power;
+    /** Sum of |x|^2 over samples counted by valid_fourth_count. */
+    float valid_fourth_weight;
+    size_t valid_fourth_count;
+    size_t adjacent_fourth_count;
+} uni_simd_qpsk_carrier_analyzer_result_t;
+
+#define UNI_SIMD_QPSK_CARRIER_ANALYZER_RESULT_DESCRIPTOR_SIZE \
+    sizeof(uni_simd_qpsk_carrier_analyzer_result_t)
 
 /** Parameter value. The field used by each ID is documented above. */
 typedef union uni_simd_param_val {

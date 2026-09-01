@@ -114,29 +114,33 @@ SIMD setup and permutation overhead is larger than the transform itself.
 ## Kernel Lifetime
 
 Every operation uses an opaque `uni_simd_kernel_t`. Primitive and IFFT instances
-hold configuration only. The streaming PFB channelizer additionally owns stream
-history.
+hold configuration only. PFB, Costas, and carrier-analyzer instances additionally
+own streaming state.
 
 Configure PFB through `uni_simd_kernel_param_set()` before its first execution.
 The first execution validates and copies the configuration and creates streaming
 state. Later calls process blocks or query the next output count;
 `uni_simd_kernel_reset()` clears PFB history directly. The legacy one-shot RESET
 parameter remains accepted.
-Creation parameters cannot be changed after streaming state exists.
+Costas and carrier-analyzer configuration is supplied through `UNI_SIMD_PARAM_CONFIG`
+and copied on first execution. `uni_simd_kernel_reset()` restores the Costas initial
+state or clears analyzer adjacency state. Creation parameters cannot be changed after
+streaming state exists.
 `uni_simd_kernel_free()` accepts NULL as a successful no-op, and
 `uni_simd_finalize()` refuses to finalize while any kernel instance remains alive.
 
-PFB supports 4, 8, 16, and 32 bins. Decimation is a nonzero divisor of the bin
-count. A configuration accepts at most 1025 finite real taps and up to eight
+PFB supports 4, 8, 16, and 32 bins. Decimation may be any value from one through
+the bin count. A configuration accepts at most 1025 finite real taps and up to eight
 unique logical bins in `[-M/2, M/2-1]`. Taps are newest-first, initial history is
 zero, and the first output is emitted for input sample zero. There is no
 end-of-stream flush operation.
 
 AVX2/FMA and AArch64 NEON PFB implementations cover every supported bin count,
 decimation, tap count, grid offset, and output selection. An explicit AVX-512
-request uses a 32-bin implementation and falls back to AVX2/FMA for smaller
-transforms; automatic dispatch keeps AVX2/FMA because AVX-512 is not consistently
-faster across core classes. SIMD code is specialized only by vector/FFT width.
+request uses AVX-512 for 32-bin transforms and multi-output 8-bin transforms,
+falling back to AVX2/FMA otherwise; automatic dispatch keeps AVX2/FMA because
+AVX-512 is not consistently faster across core classes. SIMD code is specialized
+only by vector/FFT width.
 The mirrored history ring guarantees enough overwrite headroom for four output
 hops to share coefficient loads. A single selected channel uses a direct SIMD
 transform; multiple channels use one batched backend IFFT call for all queued

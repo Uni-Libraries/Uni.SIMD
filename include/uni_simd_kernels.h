@@ -81,5 +81,27 @@ enum {
      * Stateful streaming PFB channelizer. See uni_simd_kernel_execute() for its
      * creation, query, reset, and processing protocol.
      */
-    UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32 = 14
+    UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32 = 14,
+
+    /**
+     * Stateful four-channel in-place QPSK Costas loop. CONST_POINTER CONFIG
+     * must point to uni_simd_qpsk_costas4_config_t. Input points to
+     * uni_simd_qpsk_costas4_block_t; output may be NULL or point to
+     * uni_simd_qpsk_costas4_state_t.
+     */
+    UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32 = 15,
+
+    /**
+     * Stateful QPSK carrier-statistics analyzer. CONST_POINTER CONFIG must
+     * point to uni_simd_qpsk_carrier_analyzer_config_t. Input points to
+     * uni_simd_qpsk_carrier_analyzer_block_t and output points to
+     * uni_simd_qpsk_carrier_analyzer_result_t. For x = I + jQ and
+     * p = I^2 + Q^2, samples with p greater than magnitude_epsilon contribute
+     * x^4 / p^2 to fourth_sum and p to valid_fourth_weight. Consecutive valid
+     * samples contribute y[k] * conj(y[k-1]) to adjacent_fourth_sum, including
+     * across execute calls; a rejected sample breaks adjacency. Every sample
+     * contributes x * conj(sign(I) + j sign(Q)) to decision_sum and p to
+     * input_power. Empty input is valid and does not change state.
+     */
+    UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32 = 16
 };
