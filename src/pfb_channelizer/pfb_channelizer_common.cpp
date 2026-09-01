@@ -15,9 +15,7 @@ namespace {
 
 constexpr double pi = 3.141592653589793238462643383279502884;
 
-[[nodiscard]] constexpr bool supported_bin_count(const std::size_t count) noexcept {
-    return count == 4U || count == 8U || count == 16U || count == 32U;
-}
+[[nodiscard]] constexpr bool supported_bin_count(const std::size_t count) noexcept { return count == 4U || count == 8U || count == 16U || count == 32U; }
 
 [[nodiscard]] constexpr std::size_t next_power_of_two(std::size_t value) noexcept {
     std::size_t result = 1U;
@@ -41,35 +39,26 @@ constexpr double pi = 3.141592653589793238462643383279502884;
     return static_cast<float>(value);
 }
 
-template <typename Left, typename Right>
-[[nodiscard]] bool overlaps(const std::span<Left> left, const std::span<Right> right) noexcept {
+template <typename Left, typename Right> [[nodiscard]] bool overlaps(const std::span<Left> left, const std::span<Right> right) noexcept {
     if (left.empty() || right.empty()) {
         return false;
     }
     const auto left_begin = reinterpret_cast<std::uintptr_t>(left.data());
     const auto right_begin = reinterpret_cast<std::uintptr_t>(right.data());
-    return left_begin <= right_begin ? right_begin - left_begin < left.size_bytes()
-                                     : left_begin - right_begin < right.size_bytes();
+    return left_begin <= right_begin ? right_begin - left_begin < left.size_bytes() : left_begin - right_begin < right.size_bytes();
 }
 
 } // namespace
 
 namespace detail {
 
-bool PfbChannelizer_supports_all(const PfbChannelizerData&) noexcept {
-    return true;
-}
+bool PfbChannelizer_supports_all(const PfbChannelizerData&) noexcept { return true; }
 
 std::expected<std::unique_ptr<PfbChannelizerData>, Result>
-make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChannelizerFn candidate,
-                           const PfbChannelizerSupportFn supports, const Backend backend,
-                           const PfbChannelizerFn fallback,
-                           const PfbChannelizerSupportFn fallback_supports,
-                           const Backend fallback_backend) noexcept {
-    if (!supported_bin_count(config.bin_count) || config.decimation == 0U ||
-        config.bin_count % config.decimation != 0U || config.taps.empty() ||
-        config.taps.size() > pfb_channelizer_max_taps ||
-        config.logical_bins.size() > std::min(config.bin_count, pfb_channelizer_max_outputs) ||
+make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChannelizerFn candidate, const PfbChannelizerSupportFn supports, const Backend backend,
+                          const PfbChannelizerFn fallback, const PfbChannelizerSupportFn fallback_supports, const Backend fallback_backend) noexcept {
+    if (!supported_bin_count(config.bin_count) || config.decimation == 0U || config.decimation > config.bin_count || config.taps.empty() ||
+        config.taps.size() > pfb_channelizer_max_taps || config.logical_bins.size() > std::min(config.bin_count, pfb_channelizer_max_outputs) ||
         (config.grid_offset != PfbGridOffset::integer_bins && config.grid_offset != PfbGridOffset::half_bins)) {
         return std::unexpected(Result::invalid_argument);
     }
@@ -95,15 +84,16 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
         data->taps = config.taps.size();
         data->rows = (config.taps.size() + config.bin_count - 1U) / config.bin_count;
         const std::size_t filter_span = data->rows * config.bin_count;
-        data->history_size = next_power_of_two(filter_span + 3U * config.decimation);
+        const bool staged_avx2_d4x4 = backend == Backend::avx2_fma && config.bin_count == 8U &&
+                                     config.decimation == 4U && config.logical_bins.size() > 1U;
+        data->history_size = next_power_of_two(
+            filter_span + (staged_avx2_d4x4 ? pfb_write_lookahead : 0U) + 3U * config.decimation);
         data->offset = config.grid_offset;
         data->selected_bins.assign(config.logical_bins.begin(), config.logical_bins.end());
         data->selected_fft_bins.resize(data->selected_bins.size());
         for (std::size_t output = 0U; output < data->selected_bins.size(); ++output) {
             data->selected_fft_bins[output] = static_cast<std::size_t>(
-                data->selected_bins[output] < 0
-                    ? data->selected_bins[output] + static_cast<std::int32_t>(data->bins)
-                    : data->selected_bins[output]);
+                data->selected_bins[output] < 0 ? data->selected_bins[output] + static_cast<std::int32_t>(data->bins) : data->selected_bins[output]);
         }
         data->reversed_coefficients.resize(data->rows * data->bins);
 
@@ -116,12 +106,30 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
                     tap_index < config.taps.size() ? row_sign * config.taps[tap_index] : 0.0f;
             }
         }
+        if (backend == Backend::avx512 && data->bins == 8U && data->selected_bins.size() > 1U) {
+            data->avx512_coefficients_8.resize(data->rows * 16U);
+            for (std::size_t row = 0U; row < data->rows; ++row) {
+                for (std::size_t branch = 0U; branch < 8U; ++branch) {
+                    const float coefficient = data->reversed_coefficients[row * 8U + branch];
+                    data->avx512_coefficients_8[row * 16U + branch] = coefficient;
+                    data->avx512_coefficients_8[row * 16U + 8U + branch] = coefficient;
+                }
+            }
+        }
 
         const double delta = half_grid ? 0.5 : 0.0;
         for (std::size_t branch = 0U; branch < data->bins; ++branch) {
             const double angle = 2.0 * pi * delta * static_cast<double>(branch) / static_cast<double>(data->bins);
             data->branch_rotation_re[branch] = snapped_trigonometric(std::cos(angle));
             data->branch_rotation_im[branch] = snapped_trigonometric(std::sin(angle));
+        }
+        if (data->bins == 8U) {
+            for (std::size_t branch = 0U; branch < 8U; ++branch) {
+                data->avx512_rotation_re_8[branch] = data->branch_rotation_re[branch];
+                data->avx512_rotation_re_8[8U + branch] = data->branch_rotation_re[branch];
+                data->avx512_rotation_im_8[branch] = data->branch_rotation_im[branch];
+                data->avx512_rotation_im_8[8U + branch] = data->branch_rotation_im[branch];
+            }
         }
 
         std::size_t phase_period = 1U;
@@ -141,28 +149,22 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
         for (std::size_t output = 0U; output < data->selected_bins.size(); ++output) {
             const double frequency_bin = static_cast<double>(data->selected_bins[output]) + delta;
             for (std::size_t phase = 0U; phase < phase_period; ++phase) {
-                const double angle = -2.0 * pi * frequency_bin * static_cast<double>(data->decimation_value * phase) /
-                                     static_cast<double>(data->bins);
+                const double angle = -2.0 * pi * frequency_bin * static_cast<double>(data->decimation_value * phase) / static_cast<double>(data->bins);
                 const std::size_t table_index = output * phase_period + phase;
                 data->post_phase_re[table_index] = snapped_trigonometric(std::cos(angle));
                 data->post_phase_im[table_index] = snapped_trigonometric(std::sin(angle));
             }
             if (data->selected_bins.size() == 1U) {
                 const std::size_t fft_bin = static_cast<std::size_t>(
-                    data->selected_bins[output] < 0
-                        ? data->selected_bins[output] + static_cast<std::int32_t>(data->bins)
-                        : data->selected_bins[output]);
+                    data->selected_bins[output] < 0 ? data->selected_bins[output] + static_cast<std::int32_t>(data->bins) : data->selected_bins[output]);
                 for (std::size_t branch = 0U; branch < data->bins; ++branch) {
-                    const double angle = 2.0 * pi * static_cast<double>(branch * fft_bin) /
-                                         static_cast<double>(data->bins);
+                    const double angle = 2.0 * pi * static_cast<double>(branch * fft_bin) / static_cast<double>(data->bins);
                     const double weight_re = std::cos(angle);
                     const double weight_im = std::sin(angle);
                     const double rotation_re = data->branch_rotation_re[branch];
                     const double rotation_im = data->branch_rotation_im[branch];
-                    data->selected_transform_re[branch] = snapped_trigonometric(
-                        rotation_re * weight_re - rotation_im * weight_im);
-                    data->selected_transform_im[branch] = snapped_trigonometric(
-                        rotation_re * weight_im + rotation_im * weight_re);
+                    data->selected_transform_re[branch] = snapped_trigonometric(rotation_re * weight_re - rotation_im * weight_im);
+                    data->selected_transform_im[branch] = snapped_trigonometric(rotation_re * weight_im + rotation_im * weight_re);
                 }
             }
         }

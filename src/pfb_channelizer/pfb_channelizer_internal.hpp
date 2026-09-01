@@ -15,6 +15,17 @@
 
 namespace uni::simd::detail {
 
+/**
+ * Number of input samples the streaming loops write into the history ring before running the
+ * filter batches that consume them.
+ *
+ * The polyphase window always ends on the newest sample, so writing and filtering in lockstep
+ * makes every row-0 load overlap stores that are still in the store buffer, and the wide load
+ * cannot be forwarded from the narrow stores. Staging a run of samples first puts enough
+ * distance between the two that the stores have reached L1 by the time they are read back.
+ */
+inline constexpr std::size_t pfb_write_lookahead = 64U;
+
 using PfbChannelizerFn = std::size_t (*)(struct PfbChannelizerData&,
                                          const PfbChannelizerBlock&) noexcept;
 using PfbChannelizerSupportFn = bool (*)(const struct PfbChannelizerData&) noexcept;
@@ -59,8 +70,11 @@ struct PfbChannelizerData final {
     std::vector<std::int32_t> selected_bins;
     std::vector<std::size_t> selected_fft_bins;
     PfbAlignedFloats reversed_coefficients;
+    PfbAlignedFloats avx512_coefficients_8;
     alignas(64) std::array<float, pfb_channelizer_max_bins> branch_rotation_re{};
     alignas(64) std::array<float, pfb_channelizer_max_bins> branch_rotation_im{};
+    alignas(64) std::array<float, 16U> avx512_rotation_re_8{};
+    alignas(64) std::array<float, 16U> avx512_rotation_im_8{};
     PfbAlignedFloats post_phase_re;
     PfbAlignedFloats post_phase_im;
     PfbAlignedFloats selected_transform_re;
@@ -84,6 +98,15 @@ struct PfbChannelizerAccess final {
     [[nodiscard]] static std::size_t phase_period(const PfbChannelizerData& data) noexcept { return data.phase_period; }
     [[nodiscard]] static const float* reversed_coefficients(const PfbChannelizerData& data) noexcept {
         return data.reversed_coefficients.data();
+    }
+    [[nodiscard]] static const float* avx512_coefficients_8(const PfbChannelizerData& data) noexcept {
+        return data.avx512_coefficients_8.data();
+    }
+    [[nodiscard]] static const float* avx512_rotation_re_8(const PfbChannelizerData& data) noexcept {
+        return data.avx512_rotation_re_8.data();
+    }
+    [[nodiscard]] static const float* avx512_rotation_im_8(const PfbChannelizerData& data) noexcept {
+        return data.avx512_rotation_im_8.data();
     }
     [[nodiscard]] static const float* branch_rotation_re(const PfbChannelizerData& data) noexcept {
         return data.branch_rotation_re.data();

@@ -17,6 +17,111 @@ namespace {
     return _mm512_permutexvar_ps(reverse, value);
 }
 
+[[nodiscard]] inline __m512 reverse_8_lane_halves(const __m512 value) noexcept {
+    const __m512i reverse = _mm512_setr_epi32(
+        7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8);
+    return _mm512_permutexvar_ps(reverse, value);
+}
+
+template <std::size_t HopCount, bool Rotate>
+void process_batch_8(const PfbChannelizerData& data, const PfbChannelizerBlock& block,
+                     const std::size_t* const cursors, const std::size_t* const phases,
+                     const std::size_t output_index) noexcept {
+    static_assert(HopCount >= 1U && HopCount <= 4U);
+    constexpr std::size_t pair_count = (HopCount + 1U) / 2U;
+    constexpr __mmask16 low_lanes = 0x00ffU;
+    constexpr __mmask16 high_lanes = 0xff00U;
+    const std::size_t rows = PfbChannelizerAccess::rows(data);
+    const std::size_t history_size = PfbChannelizerAccess::history_size(data);
+    const float* coefficients = PfbChannelizerAccess::avx512_coefficients_8(data);
+    const float* history_i = PfbChannelizerAccess::history_i(data);
+    const float* history_q = PfbChannelizerAccess::history_q(data);
+    const __m512 rotations_re = _mm512_load_ps(PfbChannelizerAccess::avx512_rotation_re_8(data));
+    const __m512 rotations_im = _mm512_load_ps(PfbChannelizerAccess::avx512_rotation_im_8(data));
+    alignas(64) std::array<float, 4U * 8U> values_re{};
+    alignas(64) std::array<float, 4U * 8U> values_im{};
+    __m512 accumulator_re[pair_count];
+    __m512 accumulator_im[pair_count];
+    for (std::size_t pair = 0U; pair < pair_count; ++pair) {
+        accumulator_re[pair] = _mm512_setzero_ps();
+        accumulator_im[pair] = _mm512_setzero_ps();
+    }
+
+    for (std::size_t row = 0U; row < rows; ++row) {
+        const __m512 coefficient = _mm512_load_ps(coefficients + row * 16U);
+        const std::size_t row_offset = history_size - row * 8U - 7U;
+        for (std::size_t pair = 0U; pair < pair_count; ++pair) {
+            const std::size_t first_hop = pair * 2U;
+            __m512 samples_re = _mm512_maskz_expandloadu_ps(
+                low_lanes, history_i + cursors[first_hop] + row_offset);
+            __m512 samples_im = _mm512_maskz_expandloadu_ps(
+                low_lanes, history_q + cursors[first_hop] + row_offset);
+            if (first_hop + 1U < HopCount) {
+                samples_re = _mm512_mask_expandloadu_ps(
+                    samples_re, high_lanes, history_i + cursors[first_hop + 1U] + row_offset);
+                samples_im = _mm512_mask_expandloadu_ps(
+                    samples_im, high_lanes, history_q + cursors[first_hop + 1U] + row_offset);
+            }
+            accumulator_re[pair] = _mm512_fmadd_ps(samples_re, coefficient, accumulator_re[pair]);
+            accumulator_im[pair] = _mm512_fmadd_ps(samples_im, coefficient, accumulator_im[pair]);
+        }
+    }
+
+    for (std::size_t pair = 0U; pair < pair_count; ++pair) {
+        __m512 transformed_re = reverse_8_lane_halves(accumulator_re[pair]);
+        __m512 transformed_im = reverse_8_lane_halves(accumulator_im[pair]);
+        if constexpr (Rotate) {
+            const __m512 natural_re = transformed_re;
+            const __m512 natural_im = transformed_im;
+            transformed_re = _mm512_fmsub_ps(
+                natural_re, rotations_re, _mm512_mul_ps(natural_im, rotations_im));
+            transformed_im = _mm512_fmadd_ps(
+                natural_re, rotations_im, _mm512_mul_ps(natural_im, rotations_re));
+        }
+        const std::size_t first_hop = pair * 2U;
+        if (first_hop + 1U < HopCount) {
+            _mm512_store_ps(values_re.data() + first_hop * 8U, transformed_re);
+            _mm512_store_ps(values_im.data() + first_hop * 8U, transformed_im);
+        } else {
+            _mm512_mask_store_ps(values_re.data() + first_hop * 8U, low_lanes, transformed_re);
+            _mm512_mask_store_ps(values_im.data() + first_hop * 8U, low_lanes, transformed_im);
+        }
+    }
+
+    Ifft_avx2_fma(values_re.data(), values_im.data(), 8U, HopCount, 8U);
+    for (std::size_t hop = 0U; hop < HopCount; ++hop) {
+        pfb_emit_transformed_outputs(data, block, output_index + hop, phases[hop],
+                                     values_re.data() + hop * 8U,
+                                     values_im.data() + hop * 8U);
+    }
+}
+
+template <bool Rotate>
+[[nodiscard]] std::size_t process_8(PfbChannelizerData& data,
+                                    const PfbChannelizerBlock& block) noexcept {
+    return pfb_process_streaming(
+        data, block, 4U,
+        [&](const std::size_t* const cursors, const std::size_t* const phases,
+            const std::size_t hop_count, const std::size_t output_index) noexcept {
+            switch (hop_count) {
+            case 1U:
+                process_batch_8<1U, Rotate>(data, block, cursors, phases, output_index);
+                break;
+            case 2U:
+                process_batch_8<2U, Rotate>(data, block, cursors, phases, output_index);
+                break;
+            case 3U:
+                process_batch_8<3U, Rotate>(data, block, cursors, phases, output_index);
+                break;
+            case 4U:
+                process_batch_8<4U, Rotate>(data, block, cursors, phases, output_index);
+                break;
+            default:
+                break;
+            }
+        });
+}
+
 template <std::size_t Bins, std::size_t HopCount, bool Direct, bool Rotate, bool RowIlp>
 void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& block,
                    const std::size_t* const cursors, const std::size_t* const phases,
@@ -177,12 +282,17 @@ template <std::size_t Bins>
 } // namespace
 
 bool PfbChannelizer_supports_avx512(const PfbChannelizerData& data) noexcept {
-    return data.bin_count() == 32U;
+    return data.bin_count() == 32U ||
+           (data.bin_count() == 8U && data.selected_output_count() > 1U);
 }
 
 std::size_t PfbChannelizer_avx512(PfbChannelizerData& data,
                                   const PfbChannelizerBlock& block) noexcept {
     switch (data.bin_count()) {
+    case 8U:
+        return data.grid_offset() == PfbGridOffset::half_bins
+                   ? process_8<true>(data, block)
+                   : process_8<false>(data, block);
     case 16U:
         return process_selected<16U>(data, block);
     case 32U:
