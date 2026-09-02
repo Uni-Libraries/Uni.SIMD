@@ -1,5 +1,6 @@
 #include "uni_simd.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <complex>
