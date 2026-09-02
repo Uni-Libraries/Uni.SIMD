@@ -1,6 +1,10 @@
 #pragma once
 
+#include <uni_sysinfo_cpu.h>
+
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,6 +26,9 @@ struct Status {
 };
 
 struct LogicalProcessor {
+    std::size_t snapshot_index = 0U;
+    std::size_t os_cpu_id = 0U;
+    std::uint16_t os_group = 0U;
     int logical_processor_id = -1;
     int core_id = -1;
     int package_id = -1;
@@ -30,14 +37,13 @@ struct LogicalProcessor {
     std::uint64_t l1_data_cache_bytes = 0U;
     std::uint64_t l2_cache_bytes = 0U;
     std::uint64_t l3_cache_bytes = 0U;
-    std::uint16_t group_id = 0U;
-    std::uint8_t group_index = 0U;
     std::uint64_t performance_rank = 0U;
     std::string performance_class_key = "default";
     std::string performance_class_label = "unbound";
 };
 
 struct Snapshot {
+    std::shared_ptr<uni_sysinfo_cpu_snapshot_t> native;
     std::string model_name = "unknown";
     std::vector<LogicalProcessor> logical_processors;
     std::uint32_t logical_processor_count = 0U;
@@ -72,7 +78,7 @@ enum class ThreadAffinityStatus : std::uint8_t {
 
 class ScopedThreadAffinity final {
 public:
-    explicit ScopedThreadAffinity(const LogicalProcessor& logical_processor) noexcept;
+    ScopedThreadAffinity(const Snapshot& snapshot, const LogicalProcessor& logical_processor) noexcept;
     ~ScopedThreadAffinity();
 
     ScopedThreadAffinity(const ScopedThreadAffinity&) = delete;
@@ -83,11 +89,10 @@ public:
 
 private:
     ThreadAffinityStatus status_ = ThreadAffinityStatus::failed;
-    bool restore_previous_ = false;
+    uni_sysinfo_cpu_affinity_t* previous_affinity_ = nullptr;
+    bool restore_platform_affinity_ = false;
     std::uint16_t previous_group_id_ = 0U;
     std::uint64_t previous_group_mask_ = 0U;
-    int previous_affinity_tag_ = 0;
-    std::vector<int> previous_cpu_ids_;
 };
 
 } // namespace uni::simd::benchmark::cpu_topology

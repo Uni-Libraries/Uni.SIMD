@@ -15,6 +15,18 @@ option(UNI_SIMD_BUILD_TESTS "Build Uni.SIMD tests" ${PROJECT_IS_TOP_LEVEL})
 option(UNI_SIMD_BUILD_BENCHMARKS "Build Uni.SIMD benchmarks" ${PROJECT_IS_TOP_LEVEL})
 option(UNI_SIMD_ENABLE_SANITIZERS "Enable ASan and UBSan for Uni.SIMD" OFF)
 
+if(NOT TARGET UniSysInfo::uni_sysinfo)
+    block()
+        set(UNI_SYSINFO_BUILD_CLI OFF)
+        set(BUILD_TESTING OFF)
+        if(PROJECT_IS_TOP_LEVEL)
+            add_subdirectory(3rdparty/Uni.SysInfo)
+        else()
+            add_subdirectory(3rdparty/Uni.SysInfo EXCLUDE_FROM_ALL)
+        endif()
+    endblock()
+endif()
+
 add_library(UniSIMD)
 add_library(Uni::SIMD ALIAS UniSIMD)
 
@@ -39,6 +51,7 @@ target_include_directories(UniSIMD
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(UniSIMD
     PUBLIC $<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:UNI_SIMD_STATIC>)
+target_link_libraries(UniSIMD PRIVATE UniSysInfo::uni_sysinfo)
 set(UNI_SIMD_LIBRARY_VERSION ${PROJECT_VERSION})
 if(APPLE)
     set(UNI_SIMD_LIBRARY_VERSION "${UNI_SIMD_ABI_VERSION}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}")
@@ -67,6 +80,7 @@ if(BUILD_SHARED_LIBS AND UNI_SIMD_BUILD_TESTS)
         "${CMAKE_CURRENT_BINARY_DIR}/generated"
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(UniSIMDInternal PRIVATE UNI_SIMD_STATIC)
+    target_link_libraries(UniSIMDInternal PRIVATE UniSysInfo::uni_sysinfo)
     set_target_properties(UniSIMDInternal PROPERTIES
         CXX_EXTENSIONS OFF
         POSITION_INDEPENDENT_CODE ON

@@ -1,0 +1,3 @@
+[submodule "3rdparty/Uni.SysInfo"]
+	path = 3rdparty/Uni.SysInfo
+	url = https://github.com/Uni-Libraries/Uni.SysInfo.git

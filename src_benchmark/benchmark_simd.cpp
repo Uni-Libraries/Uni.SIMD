@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <fmt/format.h>
@@ -1424,12 +1426,32 @@ void run_benchmarks(const Config& config) {
 
     for (std::size_t index = 0U; index < core_classes.size(); ++index) {
         const auto& core_class = core_classes[index];
-        topology::ScopedThreadAffinity affinity(core_class.logical_processor);
+#if defined(_WIN32)
+        std::exception_ptr worker_error;
+        std::thread worker([&] {
+            try {
+                topology::ScopedThreadAffinity affinity(topology_result.snapshot, core_class.logical_processor);
+                if (!affinity.can_run()) {
+                    throw std::runtime_error("failed to apply benchmark thread affinity for logical CPU " +
+                                             std::to_string(core_class.logical_processor.logical_processor_id));
+                }
+                run_benchmarks_on_core(config, core_class, affinity.status(), index, core_classes.size());
+            } catch (...) {
+                worker_error = std::current_exception();
+            }
+        });
+        worker.join();
+        if (worker_error) {
+            std::rethrow_exception(worker_error);
+        }
+#else
+        topology::ScopedThreadAffinity affinity(topology_result.snapshot, core_class.logical_processor);
         if (!affinity.can_run()) {
             throw std::runtime_error("failed to apply benchmark thread affinity for logical CPU " +
                                      std::to_string(core_class.logical_processor.logical_processor_id));
         }
         run_benchmarks_on_core(config, core_class, affinity.status(), index, core_classes.size());
+#endif
     }
 }
 
