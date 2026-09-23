@@ -40,7 +40,7 @@ void Costas4SinCos(const float delta, float& phase_sin, float& phase_cos) noexce
     }
 }
 
-[[nodiscard]] bool ValidBackend(const uni_simd_backend_e backend) noexcept {
+[[nodiscard]] static bool ValidBackend(const uni_simd_backend_e backend) noexcept {
     return backend <= UNI_SIMD_BACKEND_AARCH64_NEON;
 }
 
@@ -58,7 +58,7 @@ void Costas4SinCos(const float delta, float& phase_sin, float& phase_cos) noexce
     return true;
 }
 
-[[nodiscard]] bool NaturallyAligned(const void* const pointer) noexcept {
+[[nodiscard]] static bool NaturallyAligned(const void* const pointer) noexcept {
     return reinterpret_cast<std::uintptr_t>(pointer) % alignof(float) == 0U;
 }
 

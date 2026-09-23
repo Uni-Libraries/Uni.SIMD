@@ -6,9 +6,9 @@
 
 namespace uni::simd::kernels {
 
-[[nodiscard]] constexpr bool ValidBackend(const uni_simd_backend_e backend) noexcept { return backend <= UNI_SIMD_BACKEND_AARCH64_NEON; }
+[[nodiscard]] static constexpr bool ValidBackend(const uni_simd_backend_e backend) noexcept { return backend <= UNI_SIMD_BACKEND_AARCH64_NEON; }
 
-[[nodiscard]] constexpr bool NaturallyAligned(const void* const pointer) noexcept { return reinterpret_cast<std::uintptr_t>(pointer) % alignof(float) == 0U; }
+[[nodiscard]] static bool NaturallyAligned(const void* const pointer) noexcept { return reinterpret_cast<std::uintptr_t>(pointer) % alignof(float) == 0U; }
 
 [[nodiscard]] static bool Overlaps(const void* const left, const std::size_t left_bytes,
                                    const void* const right, const std::size_t right_bytes) noexcept {
