@@ -124,6 +124,22 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(
     uni_simd_kernel_t* kernel);
 
+/**
+ * PFB channelizer: take over the stream position of `source`, an initialized
+ * PFB kernel with the same configuration, so that both produce identical output
+ * for identical input from now on. Returns INVALID_STATE before either kernel
+ * has state and INVALID_ARGUMENT for other kernels or differing configurations.
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_copy_state(uni_simd_kernel_t* kernel, const uni_simd_kernel_t* source);
+
+/**
+ * PFB channelizer: consume CF32 input (`input->count` complex samples, as for
+ * execute) without producing the corresponding outputs. The kernel then continues the
+ * stream exactly as if it had processed that input. With copy_state this lets
+ * two kernels filter the two halves of one block concurrently.
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_advance(uni_simd_kernel_t* kernel, const uni_simd_const_buffer_t* input);
+
 #ifdef __cplusplus
 }
 #endif

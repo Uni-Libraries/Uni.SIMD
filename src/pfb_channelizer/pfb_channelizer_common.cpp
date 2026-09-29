@@ -220,6 +220,55 @@ Result PfbChannelizer::reset() noexcept {
     return Result::success;
 }
 
+Result PfbChannelizer::copy_state_from(const PfbChannelizer& other) noexcept {
+    if (!data_ || !other.data_) {
+        return Result::invalid_argument;
+    }
+    const auto& source = *other.data_;
+    auto& target = *data_;
+    if (source.bins != target.bins || source.decimation_value != target.decimation_value || source.history_size != target.history_size ||
+        source.phase_period != target.phase_period || source.history.size() != target.history.size() || source.offset != target.offset ||
+        source.selected_bins != target.selected_bins || source.reversed_coefficients != target.reversed_coefficients) {
+        return Result::invalid_argument;
+    }
+    if (this == &other) {
+        return Result::success;
+    }
+    std::ranges::copy(source.history, target.history.begin());
+    target.cursor = source.cursor;
+    target.decimation_phase = source.decimation_phase;
+    target.post_phase = source.post_phase;
+    return Result::success;
+}
+
+Result PfbChannelizer::advance(const std::span<const float> input) noexcept {
+    if (!data_) {
+        return Result::invalid_argument;
+    }
+    if (input.size() % 2U != 0U) {
+        return Result::invalid_size;
+    }
+    auto& data = *data_;
+    const std::size_t sample_count = input.size() / 2U;
+    const std::size_t history_size = data.history_size;
+    const std::size_t history_mask = history_size - 1U;
+    float* const history_i = detail::PfbChannelizerAccess::history_i(data);
+    float* const history_q = detail::PfbChannelizerAccess::history_q(data);
+
+    // Filters only ever read the newest history_size samples, so older ones need no write.
+    const std::size_t skipped = sample_count > history_size ? sample_count - history_size : 0U;
+    for (std::size_t sample = skipped; sample < sample_count; ++sample) {
+        const std::size_t target = (data.cursor + sample) & history_mask;
+        history_i[target] = history_i[target + history_size] = input[2U * sample];
+        history_q[target] = history_q[target + history_size] = input[2U * sample + 1U];
+    }
+    const std::size_t hops = detail::pfb_output_count_unchecked(data, sample_count);
+    data.post_phase = (data.post_phase + hops) % data.phase_period;
+    data.cursor = (data.cursor + sample_count) & history_mask;
+    data.decimation_phase = (data.decimation_phase + sample_count) % data.decimation_value;
+    return Result::success;
+}
+
 std::expected<std::size_t, Result> PfbChannelizer::output_count(const std::size_t input_count) const noexcept {
     if (!data_) {
         return std::unexpected(Result::invalid_argument);

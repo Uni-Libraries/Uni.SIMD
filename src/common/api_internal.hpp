@@ -111,7 +111,23 @@ public:
     [[nodiscard]] std::expected<std::size_t, Result> output_count(std::size_t input_count) const noexcept;
     [[nodiscard]] std::expected<std::size_t, Result> process(const PfbChannelizerBlock& block) noexcept;
 
-private:
+    /**
+     * Take over the stream position of `other`, a channelizer created with the same
+     * configuration: afterwards both produce identical outputs for identical input.
+     */
+    [[nodiscard]] Result copy_state_from(const PfbChannelizer& other) noexcept;
+
+    /**
+     * Consume interleaved I/Q input without producing its outputs.
+     *
+     * The state then equals that of a channelizer which processed `input`, so the next
+     * process() call continues the stream exactly. Together with copy_state_from() this lets
+     * a second channelizer start mid-block while the first one filters the part before it:
+     * copy the first one's state, advance over that part, then process the rest.
+     */
+    [[nodiscard]] Result advance(std::span<const float> input) noexcept;
+
+  private:
     std::unique_ptr<detail::PfbChannelizerData> data_;
     friend class Context;
 };

@@ -550,6 +550,77 @@ void test_d4x4_automatic_matches_avx2_bitwise() {
     }
 }
 
+void test_forked_tail_matches_whole_block() {
+    // A second channelizer that copies the first one's state and advances over the head of a
+    // block must filter the tail as the first one would, bit for bit on the exact half-bin
+    // 8-bin decimate-by-4 layout, so the two halves of a block can run concurrently.
+    const auto input = make_input(8192U + 777U);
+    constexpr std::array<std::int32_t, 4U> exact_bins{-2, -1, 0, 1};
+    constexpr std::array<std::int32_t, 3U> other_bins{-4, 0, 3};
+    for (const auto backend : {uni::simd::Backend::automatic, uni::simd::Backend::generic, uni::simd::Backend::avx2_fma}) {
+        const auto context = uni::simd::create_context({.backend = backend});
+        if (!context) {
+            continue;
+        }
+        for (const std::size_t tap_count : {169U, 161U}) {
+            const auto taps = make_taps(tap_count);
+            const std::array configs{
+                uni::simd::PfbChannelizerConfig{
+                    .bin_count = 8U, .decimation = 4U, .grid_offset = uni::simd::PfbGridOffset::half_bins, .taps = taps, .logical_bins = exact_bins},
+                uni::simd::PfbChannelizerConfig{
+                    .bin_count = 8U, .decimation = 3U, .grid_offset = uni::simd::PfbGridOffset::integer_bins, .taps = taps, .logical_bins = other_bins},
+            };
+            for (const auto& config : configs) {
+                for (const std::size_t head : {std::size_t{0U}, std::size_t{16U}, std::size_t{4096U}, std::size_t{4099U}, input.size()}) {
+                    // Reference: one channelizer, first a warm-up block, then the whole block.
+                    const std::size_t warmup = 301U;
+                    auto whole = context->make_pfb_channelizer(config);
+                    auto first = context->make_pfb_channelizer(config);
+                    auto second = context->make_pfb_channelizer(config);
+                    assert(whole && first && second);
+                    const auto run_into = [&](uni::simd::PfbChannelizer& channelizer, const std::span<const Complex> samples) {
+                        const auto count = channelizer.output_count(samples.size());
+                        assert(count.has_value());
+                        std::vector<std::vector<Complex>> outputs(config.logical_bins.size(), std::vector<Complex>(*count));
+                        uni::simd::PfbChannelizerBlock block{.input = as_components(samples)};
+                        for (std::size_t output = 0U; output < outputs.size(); ++output) {
+                            block.outputs[output] = as_components(std::span<Complex>{outputs[output]});
+                        }
+                        const auto produced = channelizer.process(block);
+                        assert(produced.has_value() && *produced == *count);
+                        return outputs;
+                    };
+                    const std::span<const Complex> all{input};
+                    (void)run_into(*whole, all.first(warmup));
+                    (void)run_into(*first, all.first(warmup));
+                    const auto expected = run_into(*whole, all.subspan(warmup));
+
+                    assert(second->copy_state_from(*first) == uni::simd::Result::success);
+                    const auto block = all.subspan(warmup);
+                    const std::size_t split = std::min(head, block.size());
+                    assert(second->advance(as_components(block.first(split))) == uni::simd::Result::success);
+                    const auto head_outputs = run_into(*first, block.first(split));
+                    const auto tail_outputs = run_into(*second, block.subspan(split));
+                    for (std::size_t output = 0U; output < expected.size(); ++output) {
+                        auto joined = head_outputs[output];
+                        joined.insert(joined.end(), tail_outputs[output].begin(), tail_outputs[output].end());
+                        assert(joined.size() == expected[output].size());
+                        if (&config == &configs[0]) {
+                            assert(std::memcmp(joined.data(), expected[output].data(), joined.size() * sizeof(Complex)) == 0);
+                        } else {
+                            // Other layouts batch several hops through one inverse DFT, whose
+                            // rounding depends on the batch size, so only the last bits may differ.
+                            for (std::size_t index = 0U; index < joined.size(); ++index) {
+                                assert(std::abs(joined[index] - expected[output][index]) <= 1e-6f + 1e-5f * std::abs(expected[output][index]));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 int main() {
     const auto generic = uni::simd::create_context({.backend = uni::simd::Backend::generic});
     assert(generic.has_value());
@@ -559,5 +630,6 @@ int main() {
     test_dispatch(*generic);
     test_d4x4_specialized_output_matches_fallback();
     test_d4x4_automatic_matches_avx2_bitwise();
+    test_forked_tail_matches_whole_block();
     return 0;
 }

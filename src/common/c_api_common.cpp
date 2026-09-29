@@ -892,6 +892,35 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(uni_simd_kernel_t* const k
     }
 }
 
+uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_copy_state(uni_simd_kernel_t* const kernel, const uni_simd_kernel_t* const source) {
+    try {
+        if (kernel == nullptr || source == nullptr || kernel->id != UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32 ||
+            source->id != UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (!kernel->pfb || !source->pfb) {
+            return UNI_SIMD_RESULT_INVALID_STATE;
+        }
+        return to_c(kernel->pfb->copy_state_from(*source->pfb));
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_advance(uni_simd_kernel_t* const kernel, const uni_simd_const_buffer_t* const input) {
+    try {
+        if (kernel == nullptr || input == nullptr || kernel->id != UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32 || (input->count != 0U && input->data == nullptr)) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (!kernel->pfb) {
+            return UNI_SIMD_RESULT_INVALID_STATE;
+        }
+        return to_c(kernel->pfb->advance({static_cast<const float*>(input->data), input->count * 2U}));
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
 uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kernel_t* const kernel) {
     if (kernel == nullptr) {
         return UNI_SIMD_RESULT_SUCCESS;
