@@ -3,6 +3,7 @@
 #include "common/api_internal.hpp"
 #include "costas_loop/costas_loop_internal.hpp"
 #include "qpsk_carrier_analyzer/qpsk_carrier_analyzer_internal.hpp"
+#include "symbol_sync/symbol_sync_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -108,6 +109,7 @@ struct uni_simd_kernel_t final {
     std::optional<uni::simd::PfbChannelizer> pfb;
     std::optional<uni_simd_qpsk_costas4_t> costas4;
     std::optional<uni_simd_qpsk_carrier_analyzer_t> carrier_analyzer;
+    std::optional<uni_simd_symbol_sync4_t> symbol_sync4;
 };
 
 namespace {
@@ -139,6 +141,7 @@ namespace {
                id != UNI_SIMD_PARAM_CENTER_TAP;
     case UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32:
     case UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32:
+    case UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32:
         return id == UNI_SIMD_PARAM_CONFIG;
     default:
         return false;
@@ -146,7 +149,8 @@ namespace {
 }
 
 [[nodiscard]] bool state_created(const uni_simd_kernel_t& kernel) noexcept {
-    return kernel.pfb.has_value() || kernel.costas4.has_value() || kernel.carrier_analyzer.has_value();
+    return kernel.pfb.has_value() || kernel.costas4.has_value() || kernel.carrier_analyzer.has_value() ||
+           kernel.symbol_sync4.has_value();
 }
 
 [[nodiscard]] bool is_creation_parameter(const uni_simd_kernel_e kernel,
@@ -699,6 +703,32 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     return result;
 }
 
+[[nodiscard]] uni_simd_result_e execute_symbol_sync4(uni_simd_kernel_t& kernel,
+                                                     const void* const input,
+                                                     void* const output) noexcept {
+    if (input == nullptr || output == nullptr || !naturally_aligned<uni_simd_symbol_sync4_block_t>(input) ||
+        !naturally_aligned<uni_simd_symbol_sync4_result_t>(output) || !kernel.params.has_config || kernel.params.config == nullptr ||
+        !naturally_aligned<uni_simd_symbol_sync4_config_t>(kernel.params.config)) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    if (!kernel.symbol_sync4) {
+        // Created in place: the state carries a few kilobytes of history buffers.
+        auto& created = kernel.symbol_sync4.emplace();
+        const auto result = uni::simd::kernels::SymbolSync4Initialize(
+            created, *static_cast<const uni_simd_symbol_sync4_config_t*>(kernel.params.config), kernel.params.backend, kernel.params.math_mode);
+        if (result != UNI_SIMD_RESULT_SUCCESS) {
+            kernel.symbol_sync4.reset();
+            return result;
+        }
+    }
+    const auto block = *static_cast<const uni_simd_symbol_sync4_block_t*>(input);
+    const auto result = uni::simd::kernels::SymbolSync4Execute(*kernel.symbol_sync4, block, *static_cast<uni_simd_symbol_sync4_result_t*>(output));
+    if (result == UNI_SIMD_RESULT_SUCCESS) {
+        set_resolved_backend(kernel.params, static_cast<uni::simd::Backend>(kernel.symbol_sync4->backend));
+    }
+    return result;
+}
+
 [[nodiscard]] uni_simd_result_e execute_carrier_analyzer(uni_simd_kernel_t& kernel,
                                                          const void* const input,
                                                          void* const output) noexcept {
@@ -770,7 +800,7 @@ uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(const uni_simd_kernel_e 
         auto& active = runtime();
         const std::lock_guard lock{active.mutex};
         if (!active.initialized.load(std::memory_order_relaxed) || kernel <= UNI_SIMD_KERNEL_UNKNOWN ||
-            kernel > UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32) {
+            kernel > UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32) {
             return nullptr;
         }
         auto* const created = new (std::nothrow) uni_simd_kernel_t{.id = kernel};
@@ -850,6 +880,10 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(uni_simd_kernel_t* const k
             return kernel->carrier_analyzer
                        ? uni::simd::kernels::QpskCarrierAnalyzerReset(*kernel->carrier_analyzer)
                        : UNI_SIMD_RESULT_INVALID_STATE;
+        case UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32:
+            return kernel->symbol_sync4
+                       ? uni::simd::kernels::SymbolSync4Reset(*kernel->symbol_sync4)
+                       : UNI_SIMD_RESULT_INVALID_STATE;
         default:
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
@@ -906,6 +940,9 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(uni_simd_kernel_t* const
         }
         if (kernel->id == UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32) {
             return execute_carrier_analyzer(*kernel, input, output);
+        }
+        if (kernel->id == UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32) {
+            return execute_symbol_sync4(*kernel, input, output);
         }
         return execute_stateless(kernel->id, input, output, kernel->params, *context);
     } catch (const std::bad_alloc&) {

@@ -234,6 +234,106 @@ typedef struct uni_simd_qpsk_carrier_analyzer_result_t {
 #define UNI_SIMD_QPSK_CARRIER_ANALYZER_RESULT_DESCRIPTOR_SIZE \
     sizeof(uni_simd_qpsk_carrier_analyzer_result_t)
 
+#define UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT 4U
+
+/** Largest samples-per-symbol value (omega_max) accepted by the four-channel symbol synchronizer. */
+#define UNI_SIMD_SYMBOL_SYNC4_MAX_OMEGA 100.0
+
+/** Interpolator used by the symbol synchronizer. Both use the four samples around the symbol. */
+typedef uint32_t uni_simd_symbol_sync_interpolator_e;
+enum {
+    /** Cubic Lagrange (Farrow) interpolation through x[n-1], x[n], x[n+1], x[n+2]. */
+    UNI_SIMD_SYMBOL_SYNC_INTERPOLATOR_CUBIC = 0,
+    /** Linear interpolation between x[n] and x[n+1]. */
+    UNI_SIMD_SYMBOL_SYNC_INTERPOLATOR_LINEAR = 1
+};
+
+/** Timing error detector of the symbol synchronizer. */
+typedef uint32_t uni_simd_symbol_sync_ted_e;
+enum {
+    /** Gardner: e = Re{conj(mid) * (prev - cur)}, with mid half a symbol before cur. */
+    UNI_SIMD_SYMBOL_SYNC_TED_GARDNER = 0,
+    /** Decision-directed Mueller and Muller with QPSK decisions. */
+    UNI_SIMD_SYMBOL_SYNC_TED_MUELLER_MULLER = 1
+};
+
+/**
+ * Configuration of the four-channel symbol synchronizer. Every lane is an independent timing
+ * loop; the per-lane arrays let channels with different rates share one kernel.
+ *
+ * Per symbol k at position t_k (in input samples) the loop computes the detector error e_k and
+ *   omega_k = clamp(omega_{k-1} + beta * e_k, omega_min, omega_max)
+ *   t_{k+1} = t_k + omega_k + alpha * e_k
+ * The first symbol after reset has no error and advances by omega.
+ *
+ * With auto_ted set and ted == GARDNER, a lane switches to Mueller and Muller once the
+ * exponential average of the squared normalised error, err_norm2 = (e / energy)^2 with
+ * energy the power of the samples the detector used, stayed below mm_threshold for
+ * mm_hold_symbols consecutive symbols (after at least mm_min_symbols symbols). With
+ * auto_ted_fallback it switches back after fallback_hold_symbols symbols above
+ * fallback_threshold. A zero hold count disables that switch. Each switch clears the
+ * average and both run counters.
+ */
+typedef struct uni_simd_symbol_sync4_config_t {
+    size_t descriptor_size;
+    uni_simd_symbol_sync_interpolator_e interpolator;
+    /** Detector every lane starts with. */
+    uni_simd_symbol_sync_ted_e ted;
+    /** Initial samples per symbol; 1 <= omega_min <= omega <= omega_max <= UNI_SIMD_SYMBOL_SYNC4_MAX_OMEGA. */
+    double omega[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    double omega_min[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    double omega_max[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    /** Proportional (alpha) and integral (beta) loop gains, finite and non-negative. */
+    double alpha[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    double beta[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    uint32_t auto_ted;
+    uint32_t auto_ted_fallback;
+    /** Smoothing factor of err_norm2 average, 0 < lock_ema_alpha < 1. */
+    double lock_ema_alpha;
+    uint64_t mm_min_symbols;
+    uint32_t mm_hold_symbols;
+    uint32_t fallback_hold_symbols;
+    double mm_threshold;
+    double fallback_threshold;
+} uni_simd_symbol_sync4_config_t;
+
+#define UNI_SIMD_SYMBOL_SYNC4_CONFIG_DESCRIPTOR_SIZE sizeof(uni_simd_symbol_sync4_config_t)
+
+/**
+ * One block per lane: interleaved CF32 input samples and a buffer for the interleaved CF32
+ * symbols. Lanes may have different sample counts. The kernel keeps the few samples a symbol
+ * near the end of a block still needs, so a stream may be split into blocks anywhere.
+ */
+typedef struct uni_simd_symbol_sync4_block_t {
+    size_t descriptor_size;
+    const float* input[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    size_t input_count[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    float* output[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    /**
+     * Output capacity in symbols. input_count / omega_min + 2 is always enough while the loop
+     * error is small; a lane whose buffer fills up drops the rest of its block and reports it
+     * in uni_simd_symbol_sync4_result_t::truncated_mask.
+     */
+    size_t output_capacity[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+} uni_simd_symbol_sync4_block_t;
+
+#define UNI_SIMD_SYMBOL_SYNC4_BLOCK_DESCRIPTOR_SIZE sizeof(uni_simd_symbol_sync4_block_t)
+
+/** Symbols produced by one call and the loop state after it. */
+typedef struct uni_simd_symbol_sync4_result_t {
+    size_t descriptor_size;
+    size_t output_count[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    /** Bit per lane whose output buffer filled up before its input was consumed. */
+    uint32_t truncated_mask;
+    uni_simd_symbol_sync_ted_e ted[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    double omega[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    double err_norm2_ema[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    uint64_t symbols[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    uint64_t ted_switches[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+} uni_simd_symbol_sync4_result_t;
+
+#define UNI_SIMD_SYMBOL_SYNC4_RESULT_DESCRIPTOR_SIZE sizeof(uni_simd_symbol_sync4_result_t)
+
 /** Parameter value. The field used by each ID is documented above. */
 typedef union uni_simd_param_val {
     uint32_t u32;

@@ -93,14 +93,17 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kerne
  *   next execution attempt. Reset and query cannot be combined.
  * - Destruction: release the kernel with uni_simd_kernel_free().
  *
- * Costas/analyzer protocol:
+ * Costas/analyzer/symbol synchronizer protocol:
  * - Set CONST_POINTER CONFIG to the matching configuration descriptor before
  *   first execution. The descriptor is copied when state is created.
  * - Costas input points to uni_simd_qpsk_costas4_block_t; output may be NULL or
  *   point to uni_simd_qpsk_costas4_state_t.
  * - Analyzer input points to uni_simd_qpsk_carrier_analyzer_block_t and output
  *   points to uni_simd_qpsk_carrier_analyzer_result_t.
- * - uni_simd_kernel_reset() restores Costas initial state or clears analyzer
+ * - Symbol synchronizer input points to uni_simd_symbol_sync4_block_t and output
+ *   points to uni_simd_symbol_sync4_result_t.
+ * - uni_simd_kernel_reset() restores Costas or symbol synchronizer initial state
+ *   (the synchronizer also forgets its sample history) or clears analyzer
  *   adjacency state.
  *
  * Buffers are borrowed for the duration of the call and require their element

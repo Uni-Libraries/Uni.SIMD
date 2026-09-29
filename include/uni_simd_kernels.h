@@ -103,5 +103,14 @@ enum {
      * contributes x * conj(sign(I) + j sign(Q)) to decision_sum and p to
      * input_power. Empty input is valid and does not change state.
      */
-    UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32 = 16
+    UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32 = 16,
+
+    /**
+     * Stateful four-channel symbol synchronizer: interpolator, Gardner or Mueller and Muller
+     * timing error detector and PI timing loop per channel. CONST_POINTER CONFIG must point
+     * to uni_simd_symbol_sync4_config_t. Input points to uni_simd_symbol_sync4_block_t and
+     * output points to uni_simd_symbol_sync4_result_t. Symbols near the end of a block whose
+     * interpolation needs samples of the next block are produced by the next call.
+     */
+    UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32 = 17
 };
