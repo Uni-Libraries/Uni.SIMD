@@ -36,14 +36,15 @@ void QpskCostas4_generic(uni_simd_qpsk_costas4_t& kernel,
                 std::min(std::max(std::fma(kernel.config.beta[lane], error, kernel.state.frequency[lane]), -limit_bound), limit_bound);
             kernel.state.frequency[lane] = frequency;
             const float delta = std::fma(kernel.config.alpha[lane], error, frequency);
-            float delta_sin = 0.0f;
-            float delta_cos = 1.0f;
-            Costas4SinCos(delta, delta_sin, delta_cos);
-            const float previous_cos = kernel.state.phase_cos[lane];
-            const float previous_sin = kernel.state.phase_sin[lane];
-            kernel.state.phase_cos[lane] = std::fma(previous_cos, delta_cos, -(previous_sin * delta_sin));
-            kernel.state.phase_sin[lane] = std::fma(previous_sin, delta_cos, previous_cos * delta_sin);
-            kernel.state.phase[lane] += delta;
+
+            // Advance the phasor by the step decided one sample earlier, then queue this one.
+            const float step_cos = kernel.state.pending_step_cos[lane];
+            const float step_sin = kernel.state.pending_step_sin[lane];
+            kernel.state.phase_cos[lane] = std::fma(phase_cos, step_cos, -(phase_sin * step_sin));
+            kernel.state.phase_sin[lane] = std::fma(phase_sin, step_cos, phase_cos * step_sin);
+            kernel.state.phase[lane] += kernel.state.pending_step[lane];
+            kernel.state.pending_step[lane] = delta;
+            Costas4SinCos(delta, kernel.state.pending_step_sin[lane], kernel.state.pending_step_cos[lane]);
         }
         if (++kernel.samples_since_normalization == 512U) {
             kernel.samples_since_normalization = 0U;

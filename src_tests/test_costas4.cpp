@@ -25,6 +25,9 @@ struct OracleState {
     float phase_cos{1.0f};
     float phase_sin{};
     float frequency{};
+    float pending_step{};
+    float pending_step_cos{1.0f};
+    float pending_step_sin{};
     std::size_t samples_since_normalization{};
 };
 
@@ -66,11 +69,15 @@ void ProcessOracle(Channel& channel, const std::size_t offset, const std::size_t
         const float squared = delta * delta;
         const float delta_sin = std::fma(delta * squared, std::fma(squared, 1.0f / 120.0f, -1.0f / 6.0f), delta);
         const float delta_cos = std::fma(squared, std::fma(squared, 1.0f / 24.0f, -0.5f), 1.0f);
+        // One-sample loop delay: apply the step decided from the previous sample.
         const float previous_cos = state.phase_cos;
         const float previous_sin = state.phase_sin;
-        state.phase_cos = std::fma(previous_cos, delta_cos, -(previous_sin * delta_sin));
-        state.phase_sin = std::fma(previous_sin, delta_cos, previous_cos * delta_sin);
-        state.phase += delta;
+        state.phase_cos = std::fma(previous_cos, state.pending_step_cos, -(previous_sin * state.pending_step_sin));
+        state.phase_sin = std::fma(previous_sin, state.pending_step_cos, previous_cos * state.pending_step_sin);
+        state.phase += state.pending_step;
+        state.pending_step = delta;
+        state.pending_step_cos = delta_cos;
+        state.pending_step_sin = delta_sin;
         if (++state.samples_since_normalization == 512U) {
             state.samples_since_normalization = 0U;
             normalize();

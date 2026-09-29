@@ -6,8 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
-#include <cstring>
 #include <limits>
 
 namespace uni::simd::kernels {
@@ -18,43 +16,40 @@ namespace {
  * Load one complex sample from each of the four channels and transpose the interleaved
  * pairs into a real vector and an imaginary vector.
  *
- * Each channel contributes a 64-bit `[re, im]` pair, so two unpack steps and one
- * `movelh`/`movehl` pair are enough; this avoids the four-way scalar gather that the
- * previous revision performed for every component of every sample.
+ * Each channel contributes a 64-bit `[re, im]` pair that `movlps`/`movhps` load straight into
+ * a vector half, so two loads per vector and one shuffle per component are enough. `__m64`
+ * is a may-alias type, which keeps the float buffers legal to access this way and avoids
+ * bouncing the pairs through general-purpose registers and the stack.
  */
 struct Deinterleaved final {
     __m128 real;
     __m128 imag;
 };
 
-[[nodiscard]] inline Deinterleaved LoadChannels(float* const* const channels, const std::size_t sample) noexcept {
+struct Channels final {
+    float* lane0;
+    float* lane1;
+    float* lane2;
+    float* lane3;
+};
+
+[[nodiscard]] inline Deinterleaved LoadChannels(const Channels& channels, const std::size_t sample) noexcept {
     const std::size_t index = sample * 2U;
-    std::uint64_t bits[4];
-    for (std::size_t lane = 0U; lane < 4U; ++lane) {
-        std::memcpy(&bits[lane], channels[lane] + index, sizeof(bits[lane]));
-    }
-    const __m128 pair0 = _mm_castsi128_ps(_mm_cvtsi64_si128(static_cast<long long>(bits[0])));
-    const __m128 pair1 = _mm_castsi128_ps(_mm_cvtsi64_si128(static_cast<long long>(bits[1])));
-    const __m128 pair2 = _mm_castsi128_ps(_mm_cvtsi64_si128(static_cast<long long>(bits[2])));
-    const __m128 pair3 = _mm_castsi128_ps(_mm_cvtsi64_si128(static_cast<long long>(bits[3])));
-    const __m128 low = _mm_unpacklo_ps(pair0, pair1);  // [re0, re1, im0, im1]
-    const __m128 high = _mm_unpacklo_ps(pair2, pair3); // [re2, re3, im2, im3]
-    return {_mm_movelh_ps(low, high), _mm_movehl_ps(high, low)};
+    const __m128 low = _mm_loadh_pi(_mm_loadl_pi(_mm_setzero_ps(), reinterpret_cast<const __m64*>(channels.lane0 + index)),
+                                    reinterpret_cast<const __m64*>(channels.lane1 + index)); // [re0, im0, re1, im1]
+    const __m128 high = _mm_loadh_pi(_mm_loadl_pi(_mm_setzero_ps(), reinterpret_cast<const __m64*>(channels.lane2 + index)),
+                                     reinterpret_cast<const __m64*>(channels.lane3 + index)); // [re2, im2, re3, im3]
+    return {_mm_shuffle_ps(low, high, _MM_SHUFFLE(2, 0, 2, 0)), _mm_shuffle_ps(low, high, _MM_SHUFFLE(3, 1, 3, 1))};
 }
 
-inline void StoreChannels(float* const* const channels, const std::size_t sample, const __m128 real, const __m128 imag) noexcept {
+inline void StoreChannels(const Channels& channels, const std::size_t sample, const __m128 real, const __m128 imag) noexcept {
     const std::size_t index = sample * 2U;
     const __m128 low = _mm_unpacklo_ps(real, imag);  // [re0, im0, re1, im1]
     const __m128 high = _mm_unpackhi_ps(real, imag); // [re2, im2, re3, im3]
-    const std::uint64_t bits[4]{
-        static_cast<std::uint64_t>(_mm_cvtsi128_si64(_mm_castps_si128(low))),
-        static_cast<std::uint64_t>(_mm_cvtsi128_si64(_mm_castps_si128(_mm_movehl_ps(low, low)))),
-        static_cast<std::uint64_t>(_mm_cvtsi128_si64(_mm_castps_si128(high))),
-        static_cast<std::uint64_t>(_mm_cvtsi128_si64(_mm_castps_si128(_mm_movehl_ps(high, high)))),
-    };
-    for (std::size_t lane = 0U; lane < 4U; ++lane) {
-        std::memcpy(channels[lane] + index, &bits[lane], sizeof(bits[lane]));
-    }
+    _mm_storel_pi(reinterpret_cast<__m64*>(channels.lane0 + index), low);
+    _mm_storeh_pi(reinterpret_cast<__m64*>(channels.lane1 + index), low);
+    _mm_storel_pi(reinterpret_cast<__m64*>(channels.lane2 + index), high);
+    _mm_storeh_pi(reinterpret_cast<__m64*>(channels.lane3 + index), high);
 }
 
 } // namespace
@@ -65,6 +60,9 @@ void QpskCostas4_avx2(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costa
     __m128 phase_sin = _mm_loadu_ps(kernel.state.phase_sin);
     __m128 frequency = _mm_loadu_ps(kernel.state.frequency);
     __m128 last_error = _mm_loadu_ps(kernel.state.last_error);
+    __m128 pending_step = _mm_loadu_ps(kernel.state.pending_step);
+    __m128 pending_step_cos = _mm_loadu_ps(kernel.state.pending_step_cos);
+    __m128 pending_step_sin = _mm_loadu_ps(kernel.state.pending_step_sin);
     const __m128 alpha = _mm_loadu_ps(kernel.config.alpha);
     const __m128 beta = _mm_loadu_ps(kernel.config.beta);
     const __m128 error_clip = _mm_loadu_ps(kernel.config.error_clip);
@@ -88,26 +86,39 @@ void QpskCostas4_avx2(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costa
     const __m128 negative_clip_bound = _mm_sub_ps(zero, clip_bound);
     const __m128 negative_limit_bound = _mm_sub_ps(zero, limit_bound);
     const bool unit_gain = _mm_movemask_ps(_mm_cmpeq_ps(input_gain, one)) == 0x0f;
+    // Held in locals so the output stores cannot be assumed to alias the pointer table,
+    // which would force a reload of all four pointers for every sample.
+    const Channels channels{block.channels[0], block.channels[1], block.channels[2], block.channels[3]};
 
     constexpr std::size_t renormalization_period = 512U;
     for (std::size_t chunk_begin = 0U; chunk_begin < block.sample_count;) {
         const std::size_t until_normalization = renormalization_period - kernel.samples_since_normalization;
         const std::size_t chunk_end = std::min(chunk_begin + until_normalization, block.sample_count);
         for (std::size_t sample = chunk_begin; sample < chunk_end; ++sample) {
-            const Deinterleaved loaded = LoadChannels(block.channels, sample);
+            const Deinterleaved loaded = LoadChannels(channels, sample);
             const __m128 real = unit_gain ? loaded.real : _mm_mul_ps(loaded.real, input_gain);
             const __m128 imag = unit_gain ? loaded.imag : _mm_mul_ps(loaded.imag, input_gain);
             const __m128 output_real = _mm_fmadd_ps(real, phase_cos, _mm_mul_ps(imag, phase_sin));
             const __m128 output_imag = _mm_fmsub_ps(imag, phase_cos, _mm_mul_ps(real, phase_sin));
-            StoreChannels(block.channels, sample, output_real, output_imag);
+            StoreChannels(channels, sample, output_real, output_imag);
 
             // copysign(1, x) * y is exactly y with x's sign bit applied, so the sign transfer
             // replaces two multiplies on the serial chain with two logical ops.
             __m128 error = _mm_sub_ps(_mm_xor_ps(output_imag, _mm_and_ps(output_real, sign_mask)), _mm_xor_ps(output_real, _mm_and_ps(output_imag, sign_mask)));
-            error = _mm_min_ps(_mm_max_ps(error, negative_clip_bound), clip_bound);
-            last_error = error;
+            __m128 next_frequency = _mm_fmadd_ps(beta, error, frequency);
 
-            frequency = _mm_min_ps(_mm_max_ps(_mm_fmadd_ps(beta, error, frequency), negative_limit_bound), limit_bound);
+            // The error clip and the frequency limit are identities unless a lane leaves its bound,
+            // which a locked loop practically never does. Checking the bounds on a predicted
+            // branch keeps the four min/max operations off the serial chain; the slow path
+            // replays the exact clamped sequence, so results stay bit-identical.
+            const __m128 error_outside = _mm_cmp_ps(_mm_and_ps(error, absolute_mask), clip_bound, _CMP_NLE_UQ);
+            const __m128 frequency_outside = _mm_cmp_ps(_mm_and_ps(next_frequency, absolute_mask), limit_bound, _CMP_NLE_UQ);
+            if (_mm_movemask_ps(_mm_or_ps(error_outside, frequency_outside)) != 0) [[unlikely]] {
+                error = _mm_min_ps(_mm_max_ps(error, negative_clip_bound), clip_bound);
+                next_frequency = _mm_min_ps(_mm_max_ps(_mm_fmadd_ps(beta, error, frequency), negative_limit_bound), limit_bound);
+            }
+            last_error = error;
+            frequency = next_frequency;
             const __m128 delta = _mm_fmadd_ps(alpha, error, frequency);
 
             const __m128 squared = _mm_mul_ps(delta, delta);
@@ -132,10 +143,16 @@ void QpskCostas4_avx2(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costa
                 delta_sin = _mm_load_ps(delta_sin_lanes);
                 delta_cos = _mm_load_ps(delta_cos_lanes);
             }
+            // Advance the phasor by the step decided one sample earlier and queue this one. The
+            // phasor update therefore depends only on the previous iteration, which splits the
+            // serial error -> step -> phasor -> error chain over two samples.
             const __m128 previous_cos = phase_cos;
-            phase_cos = _mm_fmsub_ps(previous_cos, delta_cos, _mm_mul_ps(phase_sin, delta_sin));
-            phase_sin = _mm_fmadd_ps(phase_sin, delta_cos, _mm_mul_ps(previous_cos, delta_sin));
-            phase = _mm_add_ps(phase, delta);
+            phase_cos = _mm_fmsub_ps(previous_cos, pending_step_cos, _mm_mul_ps(phase_sin, pending_step_sin));
+            phase_sin = _mm_fmadd_ps(phase_sin, pending_step_cos, _mm_mul_ps(previous_cos, pending_step_sin));
+            phase = _mm_add_ps(phase, pending_step);
+            pending_step = delta;
+            pending_step_cos = delta_cos;
+            pending_step_sin = delta_sin;
         }
         kernel.samples_since_normalization += chunk_end - chunk_begin;
         chunk_begin = chunk_end;
@@ -157,6 +174,9 @@ void QpskCostas4_avx2(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costa
     _mm_storeu_ps(kernel.state.phase_sin, phase_sin);
     _mm_storeu_ps(kernel.state.frequency, frequency);
     _mm_storeu_ps(kernel.state.last_error, last_error);
+    _mm_storeu_ps(kernel.state.pending_step, pending_step);
+    _mm_storeu_ps(kernel.state.pending_step_cos, pending_step_cos);
+    _mm_storeu_ps(kernel.state.pending_step_sin, pending_step_sin);
 }
 
 } // namespace uni::simd::kernels
