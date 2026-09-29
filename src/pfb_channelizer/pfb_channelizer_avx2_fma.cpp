@@ -60,31 +60,6 @@ inline void butterfly(__m256& even, __m256& odd) noexcept {
     odd = _mm256_sub_ps(left, right);
 }
 
-struct alignas(32) D4x4PhaseMap final {
-    std::array<std::int32_t, 8U> lanes;
-    std::array<float, 8U> signs_a;
-    std::array<float, 8U> signs_b;
-};
-
-constexpr float negative_zero = -0.0f;
-alignas(32) constexpr std::array<D4x4PhaseMap, 4U> d4x4_phase_maps{{
-    {{0, 4, 5, 1, 2, 6, 7, 3},
-     {0.0f, 0.0f, 0.0f, negative_zero, negative_zero, negative_zero, negative_zero, 0.0f},
-     {0.0f, 0.0f, negative_zero, 0.0f, negative_zero, negative_zero, 0.0f, negative_zero}},
-    {{4, 0, 1, 5, 6, 2, 3, 7},
-     {0.0f, negative_zero, negative_zero, negative_zero, negative_zero, 0.0f, 0.0f, 0.0f},
-     {negative_zero, 0.0f, negative_zero, negative_zero, 0.0f, negative_zero, 0.0f, 0.0f}},
-    {{0, 4, 5, 1, 2, 6, 7, 3},
-     {negative_zero, negative_zero, negative_zero, 0.0f, 0.0f, 0.0f, 0.0f, negative_zero},
-     {negative_zero, negative_zero, 0.0f, negative_zero, 0.0f, 0.0f, negative_zero, 0.0f}},
-    {{4, 0, 1, 5, 6, 2, 3, 7},
-     {negative_zero, 0.0f, 0.0f, 0.0f, 0.0f, negative_zero, negative_zero, negative_zero},
-     {0.0f, negative_zero, 0.0f, 0.0f, negative_zero, 0.0f, negative_zero, negative_zero}},
-}};
-
-static_assert(alignof(D4x4PhaseMap) == 32U);
-static_assert(sizeof(D4x4PhaseMap) == 96U);
-
 template <bool ExactD4x4, bool AlignedD4x4>
 inline void ifft8_four_hops_emit(const PfbChannelizerData& data, const PfbChannelizerBlock& block, const std::size_t output_index,
                                  const std::size_t* const phases, const __m256* const input_re, const __m256* const input_im) noexcept {
@@ -264,6 +239,16 @@ template <bool ExactD4x4, typename ProcessBatch>
     constexpr std::size_t groups = pfb_write_lookahead / group_samples;
     static_assert(groups >= 1U && groups * group_samples == pfb_write_lookahead);
 
+    if constexpr (ExactD4x4) {
+        if (data.d4x4_runs != nullptr && input_count - input_index >= pfb_d4x4_runs_span) {
+            PfbD4x4RunState state{.cursor = cursor, .input_index = input_index, .produced = produced, .post_phase = post_phase};
+            data.d4x4_runs(data, block, state);
+            cursor = state.cursor;
+            input_index = state.input_index;
+            produced = state.produced;
+        }
+    }
+
     std::array<std::size_t, groups> group_cursors{};
     std::array<std::array<std::size_t, 4U>, groups> group_phases{};
     while (input_count - input_index >= pfb_write_lookahead) {
@@ -362,7 +347,7 @@ template <bool ExactD4x4, typename ProcessBatch>
     return produced;
 }
 
-template <std::size_t Bins, std::size_t HopCount, bool Direct, bool Rotate, bool RowIlp>
+template <std::size_t Bins, std::size_t HopCount, bool Direct, bool Rotate>
 void process_batch_128(const PfbChannelizerData& data, const PfbChannelizerBlock& block, const std::size_t* const cursors, const std::size_t* const phases,
                        const std::size_t output_index) noexcept {
     static_assert(Bins == 4U);
@@ -379,34 +364,26 @@ void process_batch_128(const PfbChannelizerData& data, const PfbChannelizerBlock
     }
     alignas(32) std::array<float, 4U * Bins> values_re;
     alignas(32) std::array<float, 4U * Bins> values_im;
-    constexpr std::size_t chain_count = RowIlp ? 4U : 1U;
-    __m128 accumulator_re[4U][4U];
-    __m128 accumulator_im[4U][4U];
+    // Rows accumulate strictly in order, so a hop's value does not depend on how many hops
+    // share its batch (and thus not on where the stream was split into blocks).
+    __m128 accumulator_re[4U];
+    __m128 accumulator_im[4U];
     for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-        for (std::size_t chain = 0U; chain < chain_count; ++chain) {
-            accumulator_re[hop][chain] = _mm_setzero_ps();
-            accumulator_im[hop][chain] = _mm_setzero_ps();
-        }
+        accumulator_re[hop] = _mm_setzero_ps();
+        accumulator_im[hop] = _mm_setzero_ps();
     }
     for (std::size_t row = 0U; row < rows; ++row) {
         const __m128 coefficient = _mm_loadu_ps(coefficients + row * Bins);
         const std::size_t row_offset = history_size - row * Bins - (Bins - 1U);
-        const std::size_t chain = RowIlp ? row % chain_count : 0U;
         for (std::size_t hop = 0U; hop < HopCount; ++hop) {
             const std::size_t first_sample = cursors[hop] + row_offset;
-            accumulator_re[hop][chain] = _mm_fmadd_ps(_mm_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop][chain]);
-            accumulator_im[hop][chain] = _mm_fmadd_ps(_mm_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop][chain]);
+            accumulator_re[hop] = _mm_fmadd_ps(_mm_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop]);
+            accumulator_im[hop] = _mm_fmadd_ps(_mm_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop]);
         }
     }
     for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-        __m128 accumulated_re = accumulator_re[hop][0U];
-        __m128 accumulated_im = accumulator_im[hop][0U];
-        if constexpr (RowIlp) {
-            accumulated_re = _mm_add_ps(_mm_add_ps(accumulated_re, accumulator_re[hop][1U]), _mm_add_ps(accumulator_re[hop][2U], accumulator_re[hop][3U]));
-            accumulated_im = _mm_add_ps(_mm_add_ps(accumulated_im, accumulator_im[hop][1U]), _mm_add_ps(accumulator_im[hop][2U], accumulator_im[hop][3U]));
-        }
-        const __m128 natural_re = reverse_lanes(accumulated_re);
-        const __m128 natural_im = reverse_lanes(accumulated_im);
+        const __m128 natural_re = reverse_lanes(accumulator_re[hop]);
+        const __m128 natural_im = reverse_lanes(accumulator_im[hop]);
         __m128 transformed_re = natural_re;
         __m128 transformed_im = natural_im;
         if constexpr (Rotate) {
@@ -433,11 +410,11 @@ void process_batch_128(const PfbChannelizerData& data, const PfbChannelizerBlock
     }
 }
 
-template <std::size_t Bins, std::size_t HopCount, bool Direct, bool Rotate, bool RowIlp, bool ExactD4x4, bool AlignedD4x4, std::size_t FixedRows>
+template <std::size_t Bins, std::size_t HopCount, bool Direct, bool Rotate, bool ExactD4x4, bool AlignedD4x4, std::size_t FixedRows>
 void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock& block, const std::size_t* const cursors, const std::size_t* const phases,
                        const std::size_t output_index) noexcept {
     static_assert(Bins >= 8U && Bins % 8U == 0U);
-    static_assert(!ExactD4x4 || (Bins == 8U && !Direct && Rotate && !RowIlp));
+    static_assert(!ExactD4x4 || (Bins == 8U && !Direct && Rotate));
     static_assert(FixedRows == 0U || (ExactD4x4 && Bins == 8U));
     constexpr std::size_t width = 8U;
     constexpr std::size_t chunk_count = Bins / width;
@@ -465,17 +442,16 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
 
     for (std::size_t destination_chunk = 0U; destination_chunk < chunk_count; ++destination_chunk) {
         const std::size_t source_chunk = chunk_count - 1U - destination_chunk;
-        constexpr std::size_t chain_count = RowIlp ? 4U : 1U;
-        __m256 accumulator_re[4U][4U];
-        __m256 accumulator_im[4U][4U];
+        // Rows accumulate strictly in order, so a hop's value does not depend on how many hops
+        // share its batch (and thus not on where the stream was split into blocks).
+        __m256 accumulator_re[4U];
+        __m256 accumulator_im[4U];
         for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-            for (std::size_t chain = 0U; chain < chain_count; ++chain) {
-                accumulator_re[hop][chain] = _mm256_setzero_ps();
-                accumulator_im[hop][chain] = _mm256_setzero_ps();
-            }
+            accumulator_re[hop] = _mm256_setzero_ps();
+            accumulator_im[hop] = _mm256_setzero_ps();
         }
         const std::size_t chunk_offset = source_chunk * width;
-        if constexpr (Bins == 8U && HopCount == 4U && !RowIlp) {
+        if constexpr (Bins == 8U && HopCount == 4U) {
             if constexpr (ExactD4x4) {
                 std::size_t row = 0U;
                 for (; row + 1U < rows; row += 2U) {
@@ -490,14 +466,14 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
                         const __m256 a3 = _mm256_loadu_ps(history + cursors[3U] + offset0);
                         const __m256 b0 = _mm256_loadu_ps(history + cursors[0U] + offset1);
                         const __m256 b1 = _mm256_loadu_ps(history + cursors[1U] + offset1);
-                        accumulators[0U][0U] = _mm256_fmadd_ps(a0, coefficient0, accumulators[0U][0U]);
-                        accumulators[0U][0U] = _mm256_fmadd_ps(b0, coefficient1, accumulators[0U][0U]);
-                        accumulators[1U][0U] = _mm256_fmadd_ps(a1, coefficient0, accumulators[1U][0U]);
-                        accumulators[1U][0U] = _mm256_fmadd_ps(b1, coefficient1, accumulators[1U][0U]);
-                        accumulators[2U][0U] = _mm256_fmadd_ps(a2, coefficient0, accumulators[2U][0U]);
-                        accumulators[2U][0U] = _mm256_fmadd_ps(a0, coefficient1, accumulators[2U][0U]);
-                        accumulators[3U][0U] = _mm256_fmadd_ps(a3, coefficient0, accumulators[3U][0U]);
-                        accumulators[3U][0U] = _mm256_fmadd_ps(a1, coefficient1, accumulators[3U][0U]);
+                        accumulators[0U] = _mm256_fmadd_ps(a0, coefficient0, accumulators[0U]);
+                        accumulators[0U] = _mm256_fmadd_ps(b0, coefficient1, accumulators[0U]);
+                        accumulators[1U] = _mm256_fmadd_ps(a1, coefficient0, accumulators[1U]);
+                        accumulators[1U] = _mm256_fmadd_ps(b1, coefficient1, accumulators[1U]);
+                        accumulators[2U] = _mm256_fmadd_ps(a2, coefficient0, accumulators[2U]);
+                        accumulators[2U] = _mm256_fmadd_ps(a0, coefficient1, accumulators[2U]);
+                        accumulators[3U] = _mm256_fmadd_ps(a3, coefficient0, accumulators[3U]);
+                        accumulators[3U] = _mm256_fmadd_ps(a1, coefficient1, accumulators[3U]);
                     };
                     accumulate_pair(history_i, accumulator_re);
                     accumulate_pair(history_q, accumulator_im);
@@ -507,8 +483,8 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
                     const std::size_t row_offset = history_size - row * Bins - (Bins - 1U);
                     for (std::size_t hop = 0U; hop < HopCount; ++hop) {
                         const std::size_t first_sample = cursors[hop] + row_offset;
-                        accumulator_re[hop][0U] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop][0U]);
-                        accumulator_im[hop][0U] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop][0U]);
+                        accumulator_re[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop]);
+                        accumulator_im[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop]);
                     }
                 }
             } else if (data.decimation() == 4U) {
@@ -525,14 +501,14 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
                         const __m256 a3 = _mm256_loadu_ps(history + cursors[3U] + offset0);
                         const __m256 b0 = _mm256_loadu_ps(history + cursors[0U] + offset1);
                         const __m256 b1 = _mm256_loadu_ps(history + cursors[1U] + offset1);
-                        accumulators[0U][0U] = _mm256_fmadd_ps(a0, coefficient0, accumulators[0U][0U]);
-                        accumulators[0U][0U] = _mm256_fmadd_ps(b0, coefficient1, accumulators[0U][0U]);
-                        accumulators[1U][0U] = _mm256_fmadd_ps(a1, coefficient0, accumulators[1U][0U]);
-                        accumulators[1U][0U] = _mm256_fmadd_ps(b1, coefficient1, accumulators[1U][0U]);
-                        accumulators[2U][0U] = _mm256_fmadd_ps(a2, coefficient0, accumulators[2U][0U]);
-                        accumulators[2U][0U] = _mm256_fmadd_ps(a0, coefficient1, accumulators[2U][0U]);
-                        accumulators[3U][0U] = _mm256_fmadd_ps(a3, coefficient0, accumulators[3U][0U]);
-                        accumulators[3U][0U] = _mm256_fmadd_ps(a1, coefficient1, accumulators[3U][0U]);
+                        accumulators[0U] = _mm256_fmadd_ps(a0, coefficient0, accumulators[0U]);
+                        accumulators[0U] = _mm256_fmadd_ps(b0, coefficient1, accumulators[0U]);
+                        accumulators[1U] = _mm256_fmadd_ps(a1, coefficient0, accumulators[1U]);
+                        accumulators[1U] = _mm256_fmadd_ps(b1, coefficient1, accumulators[1U]);
+                        accumulators[2U] = _mm256_fmadd_ps(a2, coefficient0, accumulators[2U]);
+                        accumulators[2U] = _mm256_fmadd_ps(a0, coefficient1, accumulators[2U]);
+                        accumulators[3U] = _mm256_fmadd_ps(a3, coefficient0, accumulators[3U]);
+                        accumulators[3U] = _mm256_fmadd_ps(a1, coefficient1, accumulators[3U]);
                     };
                     accumulate_pair(history_i, accumulator_re);
                     accumulate_pair(history_q, accumulator_im);
@@ -542,8 +518,8 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
                     const std::size_t row_offset = history_size - row * Bins - (Bins - 1U);
                     for (std::size_t hop = 0U; hop < HopCount; ++hop) {
                         const std::size_t first_sample = cursors[hop] + row_offset;
-                        accumulator_re[hop][0U] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop][0U]);
-                        accumulator_im[hop][0U] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop][0U]);
+                        accumulator_re[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop]);
+                        accumulator_im[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop]);
                     }
                 }
             } else {
@@ -552,8 +528,8 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
                     const std::size_t row_offset = history_size - row * Bins - (Bins - 1U);
                     for (std::size_t hop = 0U; hop < HopCount; ++hop) {
                         const std::size_t first_sample = cursors[hop] + row_offset;
-                        accumulator_re[hop][0U] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop][0U]);
-                        accumulator_im[hop][0U] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop][0U]);
+                        accumulator_re[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop]);
+                        accumulator_im[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop]);
                     }
                 }
             }
@@ -561,11 +537,10 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
             for (std::size_t row = 0U; row < rows; ++row) {
                 const __m256 coefficient = _mm256_load_ps(coefficients + row * Bins + chunk_offset);
                 const std::size_t row_offset = history_size - row * Bins - (Bins - 1U) + chunk_offset;
-                const std::size_t chain = RowIlp ? row % chain_count : 0U;
                 for (std::size_t hop = 0U; hop < HopCount; ++hop) {
                     const std::size_t first_sample = cursors[hop] + row_offset;
-                    accumulator_re[hop][chain] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop][chain]);
-                    accumulator_im[hop][chain] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop][chain]);
+                    accumulator_re[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_i + first_sample), coefficient, accumulator_re[hop]);
+                    accumulator_im[hop] = _mm256_fmadd_ps(_mm256_loadu_ps(history_q + first_sample), coefficient, accumulator_im[hop]);
                 }
             }
         }
@@ -578,14 +553,8 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
             weight_im = _mm256_load_ps(weights_im + destination_offset);
         }
         for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-            __m256 accumulated_re = accumulator_re[hop][0U];
-            __m256 accumulated_im = accumulator_im[hop][0U];
-            if constexpr (RowIlp) {
-                accumulated_re =
-                    _mm256_add_ps(_mm256_add_ps(accumulated_re, accumulator_re[hop][1U]), _mm256_add_ps(accumulator_re[hop][2U], accumulator_re[hop][3U]));
-                accumulated_im =
-                    _mm256_add_ps(_mm256_add_ps(accumulated_im, accumulator_im[hop][1U]), _mm256_add_ps(accumulator_im[hop][2U], accumulator_im[hop][3U]));
-            }
+            const __m256 accumulated_re = accumulator_re[hop];
+            const __m256 accumulated_im = accumulator_im[hop];
             const __m256 natural_re = reverse_lanes(accumulated_re);
             const __m256 natural_im = reverse_lanes(accumulated_im);
             __m256 transformed_re = natural_re;
@@ -630,14 +599,13 @@ void process_batch_256(const PfbChannelizerData& data, const PfbChannelizerBlock
     }
 }
 
-template <std::size_t Bins, std::size_t HopCount, bool Direct, bool Rotate, bool RowIlp = false, bool ExactD4x4 = false, bool AlignedD4x4 = false,
-          std::size_t FixedRows = 0U>
+template <std::size_t Bins, std::size_t HopCount, bool Direct, bool Rotate, bool ExactD4x4 = false, bool AlignedD4x4 = false, std::size_t FixedRows = 0U>
 void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& block, const std::size_t* const cursors, const std::size_t* const phases,
                    const std::size_t output_index) noexcept {
     if constexpr (Bins == 4U) {
-        process_batch_128<Bins, HopCount, Direct, Rotate, RowIlp>(data, block, cursors, phases, output_index);
+        process_batch_128<Bins, HopCount, Direct, Rotate>(data, block, cursors, phases, output_index);
     } else {
-        process_batch_256<Bins, HopCount, Direct, Rotate, RowIlp, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
+        process_batch_256<Bins, HopCount, Direct, Rotate, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
     }
 }
 
@@ -650,22 +618,18 @@ template <std::size_t Bins, bool Direct, bool Rotate, bool ExactD4x4 = false, bo
     const std::size_t batch_limit = std::min<std::size_t>(4U, 1U + (history_size - filter_span) / data.decimation());
     const auto dispatch_batch = [&](const std::size_t* const cursors, const std::size_t* const phases, const std::size_t hop_count,
                                     const std::size_t output_index) noexcept {
-        if (hop_count == 1U) {
-            process_batch<Bins, 1U, Direct, Rotate, true, false>(data, block, cursors, phases, output_index);
-            return;
-        }
         switch (hop_count) {
         case 1U:
-            process_batch<Bins, 1U, Direct, Rotate, false, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
+            process_batch<Bins, 1U, Direct, Rotate, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
             break;
         case 2U:
-            process_batch<Bins, 2U, Direct, Rotate, false, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
+            process_batch<Bins, 2U, Direct, Rotate, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
             break;
         case 3U:
-            process_batch<Bins, 3U, Direct, Rotate, false, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
+            process_batch<Bins, 3U, Direct, Rotate, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
             break;
         case 4U:
-            process_batch<Bins, 4U, Direct, Rotate, false, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
+            process_batch<Bins, 4U, Direct, Rotate, ExactD4x4, AlignedD4x4, FixedRows>(data, block, cursors, phases, output_index);
             break;
         default:
             break;
@@ -700,9 +664,7 @@ std::size_t PfbChannelizer_avx2fma(PfbChannelizerData& data, const PfbChannelize
         produced = process_selected<4U>(data, block);
         break;
     case 8U: {
-        const auto logical_bins = data.logical_bins();
-        const bool exact_d4x4 = data.decimation() == 4U && data.grid_offset() == PfbGridOffset::half_bins && logical_bins.size() == 4U &&
-                                logical_bins[0U] == -2 && logical_bins[1U] == -1 && logical_bins[2U] == 0 && logical_bins[3U] == 1;
+        const bool exact_d4x4 = pfb_is_exact_d4x4(data);
         bool aligned_d4x4 = exact_d4x4;
         for (std::size_t output = 0U; output < 4U && aligned_d4x4; ++output) {
             aligned_d4x4 = (reinterpret_cast<std::uintptr_t>(block.outputs[output].data()) & 31U) == 0U;

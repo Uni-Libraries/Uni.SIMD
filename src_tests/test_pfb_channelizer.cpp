@@ -11,6 +11,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <span>
 #include <vector>
@@ -474,6 +475,81 @@ void test_d4x4_specialized_output_matches_fallback() {
 
 } // namespace
 
+/**
+ * Runs `config` over `input` split by `split_pattern`, writing each output into a 64-byte aligned
+ * buffer offset by `misalignment` complex samples, and returns the outputs.
+ */
+[[nodiscard]] std::vector<std::vector<Complex>> run_placed(const uni::simd::Context& context, const uni::simd::PfbChannelizerConfig& config,
+                                                           const std::span<const Complex> input, const std::span<const std::size_t> split_pattern,
+                                                           const std::size_t misalignment) {
+    auto channelizer_result = context.make_pfb_channelizer(config);
+    assert(channelizer_result.has_value());
+    auto channelizer = std::move(*channelizer_result);
+    const auto total = channelizer.output_count(input.size());
+    assert(total.has_value());
+    const std::size_t padded = *total + misalignment + 16U;
+    std::vector<std::vector<Complex>> storage(config.logical_bins.size(), std::vector<Complex>(padded));
+    std::vector<std::span<Complex>> outputs;
+    for (auto& buffer : storage) {
+        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
+        const std::size_t to_aligned = ((64U - address % 64U) % 64U) / sizeof(Complex);
+        outputs.push_back(std::span<Complex>{buffer}.subspan(to_aligned + misalignment, *total));
+    }
+
+    std::size_t produced = 0U;
+    std::size_t input_offset = 0U;
+    std::size_t split_index = 0U;
+    while (input_offset < input.size()) {
+        const std::size_t count = std::min(split_pattern[split_index++ % split_pattern.size()], input.size() - input_offset);
+        uni::simd::PfbChannelizerBlock block{.input = as_components(input.subspan(input_offset, count))};
+        for (std::size_t output = 0U; output < outputs.size(); ++output) {
+            block.outputs[output] = as_components(outputs[output].subspan(produced));
+        }
+        const auto result = channelizer.process(block);
+        assert(result.has_value());
+        produced += *result;
+        input_offset += count;
+    }
+    assert(produced == *total);
+    std::vector<std::vector<Complex>> result;
+    for (const auto output : outputs) {
+        result.emplace_back(output.begin(), output.end());
+    }
+    return result;
+}
+
+void test_d4x4_automatic_matches_avx2_bitwise() {
+    // Automatic dispatch may hand the exact d4x4 stream to the AVX-512 main loop, which must
+    // reproduce the AVX2 kernel bit for bit whatever the row count, the fragmentation, the
+    // stream position the fast loop starts at and the output alignment.
+    const auto automatic = uni::simd::create_context();
+    const auto avx2 = uni::simd::create_context({.backend = uni::simd::Backend::avx2_fma});
+    if (!automatic.has_value() || !avx2.has_value()) {
+        return;
+    }
+    constexpr std::array<std::int32_t, 4U> bins{-2, -1, 0, 1};
+    const auto input = make_input(6173U);
+    constexpr std::array<std::size_t, 1U> whole{6173U};
+    constexpr std::array<std::size_t, 6U> fragments{1000U, 257U, 3U, 2048U, 64U, 17U};
+    constexpr std::array<std::size_t, 4U> late_start{5U, 1500U, 4096U, 11U};
+    for (const std::size_t tap_count : {169U, 153U, 161U, 177U, 185U}) {
+        const auto taps = make_taps(tap_count);
+        const uni::simd::PfbChannelizerConfig config{
+            .bin_count = 8U, .decimation = 4U, .grid_offset = uni::simd::PfbGridOffset::half_bins, .taps = taps, .logical_bins = bins};
+        for (const std::span<const std::size_t> pattern :
+             {std::span<const std::size_t>{whole}, std::span<const std::size_t>{fragments}, std::span<const std::size_t>{late_start}}) {
+            for (const std::size_t misalignment : {0U, 1U}) {
+                const auto expected = run_placed(*avx2, config, input, pattern, misalignment);
+                const auto actual = run_placed(*automatic, config, input, pattern, misalignment);
+                for (std::size_t output = 0U; output < expected.size(); ++output) {
+                    assert(expected[output].size() == actual[output].size());
+                    assert(std::memcmp(expected[output].data(), actual[output].data(), expected[output].size() * sizeof(Complex)) == 0);
+                }
+            }
+        }
+    }
+}
+
 int main() {
     const auto generic = uni::simd::create_context({.backend = uni::simd::Backend::generic});
     assert(generic.has_value());
@@ -482,5 +558,6 @@ int main() {
     test_streaming_alignment_and_wrap(*generic);
     test_dispatch(*generic);
     test_d4x4_specialized_output_matches_fallback();
+    test_d4x4_automatic_matches_avx2_bitwise();
     return 0;
 }

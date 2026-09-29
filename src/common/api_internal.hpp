@@ -87,6 +87,7 @@ struct PfbChannelizerBlock {
 
 namespace detail {
 struct PfbChannelizerData;
+struct PfbD4x4RunState;
 }
 
 class Context;
@@ -196,6 +197,7 @@ private:
     using SymmetricDotFn = std::complex<float> (*)(const void*, const float*, std::size_t, float) noexcept;
     using PfbChannelizerFn = std::size_t (*)(detail::PfbChannelizerData&, const PfbChannelizerBlock&) noexcept;
     using PfbChannelizerSupportFn = bool (*)(const detail::PfbChannelizerData&) noexcept;
+    using PfbD4x4RunsFn = void (*)(detail::PfbChannelizerData&, const PfbChannelizerBlock&, detail::PfbD4x4RunState&) noexcept;
     using IfftFn = void (*)(float*, float*, std::size_t, std::size_t, std::size_t) noexcept;
     using IfftSupportFn = bool (*)(std::size_t) noexcept;
 
@@ -216,6 +218,8 @@ private:
     PfbChannelizerFn pfb_channelizer_fallback_ = nullptr;
     PfbChannelizerSupportFn pfb_channelizer_fallback_support_ = nullptr;
     Backend pfb_channelizer_fallback_backend_ = Backend::generic;
+    /** Optional AVX-512 main loop for the AVX2 exact half-bin 8-bin decimate-by-4 path. */
+    PfbD4x4RunsFn pfb_d4x4_runs_ = nullptr;
     IfftFn ifft_ = nullptr;
     IfftSupportFn ifft_support_ = nullptr;
     Backend ifft_backend_ = Backend::generic;

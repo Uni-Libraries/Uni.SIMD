@@ -26,9 +26,31 @@ namespace uni::simd::detail {
  */
 inline constexpr std::size_t pfb_write_lookahead = 64U;
 
+/**
+ * Samples the AVX-512 d4x4 loop stages into the history ring before filtering them. Its wider
+ * loads need more distance from the stores than the AVX2 loop's pfb_write_lookahead.
+ */
+inline constexpr std::size_t pfb_d4x4_runs_span = 256U;
+
 using PfbChannelizerFn = std::size_t (*)(struct PfbChannelizerData&,
                                          const PfbChannelizerBlock&) noexcept;
 using PfbChannelizerSupportFn = bool (*)(const struct PfbChannelizerData&) noexcept;
+
+/** Streaming position shared between the AVX2 exact d4x4 loop and its AVX-512 main loop. */
+struct PfbD4x4RunState final {
+    std::size_t cursor = 0U;
+    std::size_t input_index = 0U;
+    std::size_t produced = 0U;
+    std::size_t post_phase = 0U;
+};
+
+/**
+ * Runs whole `pfb_d4x4_runs_span` spans of the exact half-bin, 8-bin, decimate-by-4 stream:
+ * stages each span into the history ring and emits its hops. Returns with fewer than
+ * `pfb_d4x4_runs_span` input samples left; the caller finishes the rest. Every hop accumulates
+ * its rows in order, so the output is bit-identical to the AVX2 loops.
+ */
+using PfbD4x4RunsFn = void (*)(struct PfbChannelizerData&, const PfbChannelizerBlock&, PfbD4x4RunState&) noexcept;
 
 template <typename Value>
 class PfbAlignedAllocator {
@@ -67,6 +89,7 @@ struct PfbChannelizerData final {
     PfbGridOffset offset = PfbGridOffset::integer_bins;
     Backend selected_backend = Backend::generic;
     PfbChannelizerFn process = nullptr;
+    PfbD4x4RunsFn d4x4_runs = nullptr;
     std::vector<std::int32_t> selected_bins;
     std::vector<std::size_t> selected_fft_bins;
     PfbAlignedFloats reversed_coefficients;
@@ -152,10 +175,9 @@ struct PfbChannelizerAccess final {
 };
 
 [[nodiscard]] std::expected<std::unique_ptr<PfbChannelizerData>, Result>
-make_pfb_channelizer_data(const PfbChannelizerConfig& config, PfbChannelizerFn candidate,
-                          PfbChannelizerSupportFn supports, Backend backend,
-                          PfbChannelizerFn fallback, PfbChannelizerSupportFn fallback_supports,
-                          Backend fallback_backend) noexcept;
+make_pfb_channelizer_data(const PfbChannelizerConfig& config, PfbChannelizerFn candidate, PfbChannelizerSupportFn supports, Backend backend,
+                          PfbChannelizerFn fallback, PfbChannelizerSupportFn fallback_supports, Backend fallback_backend,
+                          PfbD4x4RunsFn d4x4_runs = nullptr) noexcept;
 
 [[nodiscard]] std::size_t PfbChannelizer_generic(PfbChannelizerData& data,
                                                  const PfbChannelizerBlock& block) noexcept;
@@ -165,8 +187,45 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, PfbChannelizerFn c
                                                 const PfbChannelizerBlock& block) noexcept;
 [[nodiscard]] std::size_t PfbChannelizer_neon(PfbChannelizerData& data,
                                                const PfbChannelizerBlock& block) noexcept;
+void PfbD4x4Runs_avx512(PfbChannelizerData& data, const PfbChannelizerBlock& block, PfbD4x4RunState& state) noexcept;
 [[nodiscard]] bool PfbChannelizer_supports_all(const PfbChannelizerData&) noexcept;
 [[nodiscard]] bool PfbChannelizer_supports_avx512(const PfbChannelizerData&) noexcept;
+
+/**
+ * The exact half-bin, 8-bin, decimate-by-4 layout with logical bins -2..1: every post phase is
+ * a quarter turn and the four outputs come straight out of the 8-point transform.
+ */
+[[nodiscard]] inline bool pfb_is_exact_d4x4(const PfbChannelizerData& data) noexcept {
+    const auto bins = data.logical_bins();
+    return data.bin_count() == 8U && data.decimation() == 4U && data.grid_offset() == PfbGridOffset::half_bins && bins.size() == 4U && bins[0U] == -2 &&
+           bins[1U] == -1 && bins[2U] == 0 && bins[3U] == 1;
+}
+
+/** Output lane order and sign flips that apply the exact d4x4 post phase to packed transform outputs. */
+struct alignas(32) D4x4PhaseMap final {
+    std::array<std::int32_t, 8U> lanes;
+    std::array<float, 8U> signs_a;
+    std::array<float, 8U> signs_b;
+};
+
+inline constexpr float d4x4_negative_zero = -0.0f;
+alignas(32) inline constexpr std::array<D4x4PhaseMap, 4U> d4x4_phase_maps{{
+    {{0, 4, 5, 1, 2, 6, 7, 3},
+     {0.0f, 0.0f, 0.0f, d4x4_negative_zero, d4x4_negative_zero, d4x4_negative_zero, d4x4_negative_zero, 0.0f},
+     {0.0f, 0.0f, d4x4_negative_zero, 0.0f, d4x4_negative_zero, d4x4_negative_zero, 0.0f, d4x4_negative_zero}},
+    {{4, 0, 1, 5, 6, 2, 3, 7},
+     {0.0f, d4x4_negative_zero, d4x4_negative_zero, d4x4_negative_zero, d4x4_negative_zero, 0.0f, 0.0f, 0.0f},
+     {d4x4_negative_zero, 0.0f, d4x4_negative_zero, d4x4_negative_zero, 0.0f, d4x4_negative_zero, 0.0f, 0.0f}},
+    {{0, 4, 5, 1, 2, 6, 7, 3},
+     {d4x4_negative_zero, d4x4_negative_zero, d4x4_negative_zero, 0.0f, 0.0f, 0.0f, 0.0f, d4x4_negative_zero},
+     {d4x4_negative_zero, d4x4_negative_zero, 0.0f, d4x4_negative_zero, 0.0f, 0.0f, d4x4_negative_zero, 0.0f}},
+    {{4, 0, 1, 5, 6, 2, 3, 7},
+     {d4x4_negative_zero, 0.0f, 0.0f, 0.0f, 0.0f, d4x4_negative_zero, d4x4_negative_zero, d4x4_negative_zero},
+     {0.0f, d4x4_negative_zero, 0.0f, 0.0f, d4x4_negative_zero, 0.0f, d4x4_negative_zero, d4x4_negative_zero}},
+}};
+
+static_assert(alignof(D4x4PhaseMap) == 32U);
+static_assert(sizeof(D4x4PhaseMap) == 96U);
 
 [[nodiscard]] inline std::size_t pfb_output_count_unchecked(const PfbChannelizerData& data,
                                                              const std::size_t input_count) noexcept {

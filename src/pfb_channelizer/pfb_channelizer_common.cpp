@@ -3,6 +3,7 @@
 #include "pfb_channelizer/pfb_channelizer_internal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -54,9 +55,11 @@ namespace detail {
 
 bool PfbChannelizer_supports_all(const PfbChannelizerData&) noexcept { return true; }
 
-std::expected<std::unique_ptr<PfbChannelizerData>, Result>
-make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChannelizerFn candidate, const PfbChannelizerSupportFn supports, const Backend backend,
-                          const PfbChannelizerFn fallback, const PfbChannelizerSupportFn fallback_supports, const Backend fallback_backend) noexcept {
+std::expected<std::unique_ptr<PfbChannelizerData>, Result> make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChannelizerFn candidate,
+                                                                                     const PfbChannelizerSupportFn supports, const Backend backend,
+                                                                                     const PfbChannelizerFn fallback,
+                                                                                     const PfbChannelizerSupportFn fallback_supports,
+                                                                                     const Backend fallback_backend, const PfbD4x4RunsFn d4x4_runs) noexcept {
     if (!supported_bin_count(config.bin_count) || config.decimation == 0U || config.decimation > config.bin_count || config.taps.empty() ||
         config.taps.size() > pfb_channelizer_max_taps || config.logical_bins.size() > std::min(config.bin_count, pfb_channelizer_max_outputs) ||
         (config.grid_offset != PfbGridOffset::integer_bins && config.grid_offset != PfbGridOffset::half_bins)) {
@@ -86,8 +89,10 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
         const std::size_t filter_span = data->rows * config.bin_count;
         const bool staged_avx2_d4x4 = backend == Backend::avx2_fma && config.bin_count == 8U &&
                                      config.decimation == 4U && config.logical_bins.size() > 1U;
-        data->history_size = next_power_of_two(
-            filter_span + (staged_avx2_d4x4 ? pfb_write_lookahead : 0U) + 3U * config.decimation);
+        const bool avx512_d4x4 = staged_avx2_d4x4 && d4x4_runs != nullptr && config.grid_offset == PfbGridOffset::half_bins &&
+                                 std::ranges::equal(config.logical_bins, std::array<std::int32_t, 4U>{-2, -1, 0, 1});
+        const std::size_t staging = avx512_d4x4 ? std::max(pfb_write_lookahead, pfb_d4x4_runs_span) : (staged_avx2_d4x4 ? pfb_write_lookahead : 0U);
+        data->history_size = next_power_of_two(filter_span + staging + 3U * config.decimation);
         data->offset = config.grid_offset;
         data->selected_bins.assign(config.logical_bins.begin(), config.logical_bins.end());
         data->selected_fft_bins.resize(data->selected_bins.size());
@@ -172,6 +177,9 @@ make_pfb_channelizer_data(const PfbChannelizerConfig& config, const PfbChanneliz
         if (candidate != nullptr && supports != nullptr && supports(*data)) {
             data->process = candidate;
             data->selected_backend = backend;
+            if (avx512_d4x4) {
+                data->d4x4_runs = d4x4_runs;
+            }
         } else if (fallback != nullptr && fallback_supports != nullptr && fallback_supports(*data)) {
             data->process = fallback;
             data->selected_backend = fallback_backend;

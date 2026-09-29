@@ -224,6 +224,9 @@ std::expected<Context, Result> create_context(const ContextOptions options) noex
     const bool allow_avx512 = requested != Backend::automatic || !options.prefer_energy_efficiency;
     if (allow_avx512 && caps.avx512f && allows(requested, Backend::avx512)) {
 #if UNI_SIMD_HAVE_AVX2_FMA
+        if (requested == Backend::automatic && caps.avx2 && caps.fma) {
+            context.pfb_d4x4_runs_ = &kernels::PfbD4x4Runs_avx512;
+        }
         if (requested == Backend::avx512 && caps.avx2 && caps.fma) {
             context.pfb_channelizer_fallback_ = context.pfb_channelizer_;
             context.pfb_channelizer_fallback_support_ = context.pfb_channelizer_support_;
@@ -510,10 +513,8 @@ std::complex<float> Context::dot_symmetric_cf32_f32_unchecked(const std::complex
 
 std::expected<PfbChannelizer, Result>
 Context::make_pfb_channelizer(const PfbChannelizerConfig& config) const noexcept {
-    auto data = detail::make_pfb_channelizer_data(
-        config, pfb_channelizer_, pfb_channelizer_support_,
-        pfb_channelizer_backend_, pfb_channelizer_fallback_,
-        pfb_channelizer_fallback_support_, pfb_channelizer_fallback_backend_);
+    auto data = detail::make_pfb_channelizer_data(config, pfb_channelizer_, pfb_channelizer_support_, pfb_channelizer_backend_, pfb_channelizer_fallback_,
+                                                  pfb_channelizer_fallback_support_, pfb_channelizer_fallback_backend_, pfb_d4x4_runs_);
     if (!data) {
         return std::unexpected(data.error());
     }

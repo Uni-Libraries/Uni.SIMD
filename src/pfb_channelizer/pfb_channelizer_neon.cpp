@@ -20,9 +20,8 @@ namespace {
     return vget_lane_f32(vpadd_f32(halves, halves), 0);
 }
 
-template <std::size_t Bins, std::size_t HopCount, bool RowIlp = false>
-void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& block,
-                   const std::size_t* const cursors, const std::size_t* const phases,
+template <std::size_t Bins, std::size_t HopCount>
+void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& block, const std::size_t* const cursors, const std::size_t* const phases,
                    const std::size_t output_index) noexcept {
     static_assert(Bins % 4U == 0U);
     constexpr std::size_t width = 4U;
@@ -50,26 +49,20 @@ void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& bl
 
     for (std::size_t destination_chunk = 0U; destination_chunk < chunk_count; ++destination_chunk) {
         const std::size_t source_chunk = chunk_count - 1U - destination_chunk;
-        constexpr std::size_t chain_count = RowIlp ? 4U : 1U;
-        float32x4_t accumulator_re[4U][4U];
-        float32x4_t accumulator_im[4U][4U];
+        float32x4_t accumulator_re[4U];
+        float32x4_t accumulator_im[4U];
         for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-            for (std::size_t chain = 0U; chain < chain_count; ++chain) {
-                accumulator_re[hop][chain] = vdupq_n_f32(0.0f);
-                accumulator_im[hop][chain] = vdupq_n_f32(0.0f);
-            }
+            accumulator_re[hop] = vdupq_n_f32(0.0f);
+            accumulator_im[hop] = vdupq_n_f32(0.0f);
         }
         for (std::size_t row = 0U; row < rows; ++row) {
             const std::size_t chunk_offset = source_chunk * width;
             const float32x4_t coefficient = vld1q_f32(coefficients + row * Bins + chunk_offset);
             const std::size_t row_offset = history_size - row * Bins - (Bins - 1U) + chunk_offset;
-            const std::size_t chain = RowIlp ? row % chain_count : 0U;
             for (std::size_t hop = 0U; hop < HopCount; ++hop) {
                 const std::size_t first_sample = cursors[hop] + row_offset;
-                accumulator_re[hop][chain] = vfmaq_f32(
-                    accumulator_re[hop][chain], vld1q_f32(history_i + first_sample), coefficient);
-                accumulator_im[hop][chain] = vfmaq_f32(
-                    accumulator_im[hop][chain], vld1q_f32(history_q + first_sample), coefficient);
+                accumulator_re[hop] = vfmaq_f32(accumulator_re[hop], vld1q_f32(history_i + first_sample), coefficient);
+                accumulator_im[hop] = vfmaq_f32(accumulator_im[hop], vld1q_f32(history_q + first_sample), coefficient);
             }
         }
 
@@ -81,16 +74,8 @@ void process_batch(const PfbChannelizerData& data, const PfbChannelizerBlock& bl
         const float32x4_t weight_im = direct ? vld1q_f32(weights_im + destination_offset)
                                              : vdupq_n_f32(0.0f);
         for (std::size_t hop = 0U; hop < HopCount; ++hop) {
-            float32x4_t accumulated_re = accumulator_re[hop][0U];
-            float32x4_t accumulated_im = accumulator_im[hop][0U];
-            if constexpr (RowIlp) {
-                accumulated_re = vaddq_f32(
-                    vaddq_f32(accumulated_re, accumulator_re[hop][1U]),
-                    vaddq_f32(accumulator_re[hop][2U], accumulator_re[hop][3U]));
-                accumulated_im = vaddq_f32(
-                    vaddq_f32(accumulated_im, accumulator_im[hop][1U]),
-                    vaddq_f32(accumulator_im[hop][2U], accumulator_im[hop][3U]));
-            }
+            const float32x4_t accumulated_re = accumulator_re[hop];
+            const float32x4_t accumulated_im = accumulator_im[hop];
             const float32x4_t natural_re = reverse_lanes(accumulated_re);
             const float32x4_t natural_im = reverse_lanes(accumulated_im);
             float32x4_t transformed_re = natural_re;
@@ -141,10 +126,6 @@ template <std::size_t Bins>
         data, block, batch_limit,
         [&](const std::size_t* const cursors, const std::size_t* const phases,
             const std::size_t hop_count, const std::size_t output_index) noexcept {
-            if (hop_count == 1U) {
-                process_batch<Bins, 1U, true>(data, block, cursors, phases, output_index);
-                return;
-            }
             switch (hop_count) {
             case 1U:
                 process_batch<Bins, 1U>(data, block, cursors, phases, output_index);
