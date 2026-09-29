@@ -174,11 +174,20 @@ typedef struct uni_simd_qpsk_costas4_block_t {
 #define UNI_SIMD_QPSK_COSTAS4_BLOCK_DESCRIPTOR_SIZE sizeof(uni_simd_qpsk_costas4_block_t)
 
 /**
- * Loop state of the four-channel QPSK Costas kernel.
+ * Pipeline delay of the Costas loop in samples.
  *
- * The loop has a one-sample pipeline delay: the phase step decided from sample n is applied to
- * the phasor after sample n + 1 has been de-rotated, so the phasor update never waits for the
- * error of the sample just processed. `pending_*` holds that decided-but-not-yet-applied step.
+ * The phase step decided from sample n rotates the phasor only after sample n + DELAY has been
+ * de-rotated. Deciding a step (de-rotation, detector, loop filter, sin/cos) takes several times
+ * longer than rotating the phasor, and with the delay the two overlap across samples instead of
+ * following each other, so a sample costs about one phasor rotation. A carrier loop runs with a
+ * bandwidth far below 1 / DELAY, where a few samples of extra loop delay cost a negligible
+ * phase margin.
+ */
+#define UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY 2U
+
+/**
+ * Loop state of the four-channel QPSK Costas kernel. `pending_*[k]` hold the steps decided but
+ * not yet applied, oldest first: pending_*[0] rotates the phasor after the next sample.
  */
 typedef struct uni_simd_qpsk_costas4_state_t {
     size_t descriptor_size;
@@ -187,9 +196,9 @@ typedef struct uni_simd_qpsk_costas4_state_t {
     float phase_sin[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
     float frequency[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
     float last_error[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
-    float pending_step[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
-    float pending_step_cos[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
-    float pending_step_sin[UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float pending_step[UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY][UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float pending_step_cos[UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY][UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
+    float pending_step_sin[UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY][UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT];
 } uni_simd_qpsk_costas4_state_t;
 
 #define UNI_SIMD_QPSK_COSTAS4_STATE_DESCRIPTOR_SIZE sizeof(uni_simd_qpsk_costas4_state_t)

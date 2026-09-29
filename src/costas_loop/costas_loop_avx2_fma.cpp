@@ -60,9 +60,24 @@ void QpskCostas4_avx2(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costa
     __m128 phase_sin = _mm_loadu_ps(kernel.state.phase_sin);
     __m128 frequency = _mm_loadu_ps(kernel.state.frequency);
     __m128 last_error = _mm_loadu_ps(kernel.state.last_error);
-    __m128 pending_step = _mm_loadu_ps(kernel.state.pending_step);
-    __m128 pending_step_cos = _mm_loadu_ps(kernel.state.pending_step_cos);
-    __m128 pending_step_sin = _mm_loadu_ps(kernel.state.pending_step_sin);
+    // Steps decided but not yet applied (see UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY), as a ring in
+    // L1: slot `pending_slot` holds the oldest step, which is read and then overwritten by the
+    // newest. A step is stored `delay` samples before it is loaded, so the store-to-load
+    // round trip stays off the recurrence, while holding all of them in registers would not
+    // leave enough registers for the loop.
+    constexpr std::size_t delay = UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY;
+    static_assert((delay & (delay - 1U)) == 0U, "the pending ring is indexed with a mask");
+    struct PendingStep final {
+        __m128 step;
+        __m128 cos;
+        __m128 sin;
+    };
+    PendingStep pending[delay];
+    for (std::size_t index = 0U; index < delay; ++index) {
+        pending[index] = {_mm_loadu_ps(kernel.state.pending_step[index]), _mm_loadu_ps(kernel.state.pending_step_cos[index]),
+                          _mm_loadu_ps(kernel.state.pending_step_sin[index])};
+    }
+    std::size_t pending_slot = 0U;
     const __m128 alpha = _mm_loadu_ps(kernel.config.alpha);
     const __m128 beta = _mm_loadu_ps(kernel.config.beta);
     const __m128 error_clip = _mm_loadu_ps(kernel.config.error_clip);
@@ -143,16 +158,16 @@ void QpskCostas4_avx2(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costa
                 delta_sin = _mm_load_ps(delta_sin_lanes);
                 delta_cos = _mm_load_ps(delta_cos_lanes);
             }
-            // Advance the phasor by the step decided one sample earlier and queue this one. The
-            // phasor update therefore depends only on the previous iteration, which splits the
-            // serial error -> step -> phasor -> error chain over two samples.
+            // Advance the phasor by the oldest pending step and queue this sample's step. The
+            // phasor only waits for a step decided `delay` samples ago, so the long
+            // error -> step chain of one sample runs alongside the rotations of the next ones.
+            const PendingStep oldest = pending[pending_slot];
             const __m128 previous_cos = phase_cos;
-            phase_cos = _mm_fmsub_ps(previous_cos, pending_step_cos, _mm_mul_ps(phase_sin, pending_step_sin));
-            phase_sin = _mm_fmadd_ps(phase_sin, pending_step_cos, _mm_mul_ps(previous_cos, pending_step_sin));
-            phase = _mm_add_ps(phase, pending_step);
-            pending_step = delta;
-            pending_step_cos = delta_cos;
-            pending_step_sin = delta_sin;
+            phase_cos = _mm_fmsub_ps(previous_cos, oldest.cos, _mm_mul_ps(phase_sin, oldest.sin));
+            phase_sin = _mm_fmadd_ps(phase_sin, oldest.cos, _mm_mul_ps(previous_cos, oldest.sin));
+            phase = _mm_add_ps(phase, oldest.step);
+            pending[pending_slot] = {delta, delta_cos, delta_sin};
+            pending_slot = (pending_slot + 1U) & (delay - 1U);
         }
         kernel.samples_since_normalization += chunk_end - chunk_begin;
         chunk_begin = chunk_end;
@@ -174,9 +189,13 @@ void QpskCostas4_avx2(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costa
     _mm_storeu_ps(kernel.state.phase_sin, phase_sin);
     _mm_storeu_ps(kernel.state.frequency, frequency);
     _mm_storeu_ps(kernel.state.last_error, last_error);
-    _mm_storeu_ps(kernel.state.pending_step, pending_step);
-    _mm_storeu_ps(kernel.state.pending_step_cos, pending_step_cos);
-    _mm_storeu_ps(kernel.state.pending_step_sin, pending_step_sin);
+    // Back to oldest-first order.
+    for (std::size_t index = 0U; index < delay; ++index) {
+        const PendingStep& step = pending[(pending_slot + index) & (delay - 1U)];
+        _mm_storeu_ps(kernel.state.pending_step[index], step.step);
+        _mm_storeu_ps(kernel.state.pending_step_cos[index], step.cos);
+        _mm_storeu_ps(kernel.state.pending_step_sin[index], step.sin);
+    }
 }
 
 } // namespace uni::simd::kernels

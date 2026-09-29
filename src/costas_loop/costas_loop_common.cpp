@@ -90,9 +90,11 @@ uni_simd_result_e QpskCostas4Initialize(
         kernel.initial_state.phase_cos[lane] = std::cos(kernel.initial_state.phase[lane]);
         kernel.initial_state.phase_sin[lane] = std::sin(kernel.initial_state.phase[lane]);
         kernel.initial_state.frequency[lane] = config.initial_frequency[lane];
-        kernel.initial_state.pending_step[lane] = 0.0f;
-        kernel.initial_state.pending_step_cos[lane] = 1.0f;
-        kernel.initial_state.pending_step_sin[lane] = 0.0f;
+        for (std::size_t delay = 0U; delay < UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY; ++delay) {
+            kernel.initial_state.pending_step[delay][lane] = 0.0f;
+            kernel.initial_state.pending_step_cos[delay][lane] = 1.0f;
+            kernel.initial_state.pending_step_sin[delay][lane] = 0.0f;
+        }
     }
     kernel.state = kernel.initial_state;
     kernel.process = &QpskCostas4_generic;
