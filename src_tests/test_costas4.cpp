@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <limits>
@@ -144,6 +145,94 @@ void Process(uni_simd_kernel_t* kernel, std::array<Channel, 4U>& channels, const
     Check(uni_simd_kernel_execute(kernel, &block, nullptr) == UNI_SIMD_RESULT_SUCCESS);
 }
 
+void TestCopyStateSkipAndRotate() {
+    const auto input = Input();
+    constexpr std::size_t kSplit = 100000U;
+    const std::size_t total = input[0].size();
+
+    // The reference runs through the whole stream.
+    auto reference = input;
+    auto* const serial = Create(UNI_SIMD_BACKEND_AUTOMATIC);
+    Process(serial, reference, 0U, kSplit);
+    auto* const copy = Create(UNI_SIMD_BACKEND_AUTOMATIC);
+    Check(uni_simd_kernel_copy_state(copy, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
+    auto* const rotated = Create(UNI_SIMD_BACKEND_AUTOMATIC);
+    Check(uni_simd_kernel_copy_state(rotated, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
+    auto* const skipped = Create(UNI_SIMD_BACKEND_AUTOMATIC);
+    Check(uni_simd_kernel_copy_state(skipped, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
+    Process(serial, reference, kSplit, total - kSplit);
+
+    // A copy continues bit for bit.
+    auto copied = input;
+    Process(copy, copied, kSplit, total - kSplit);
+    for (std::size_t lane = 0U; lane < 4U; ++lane) {
+        Check(std::equal(copied[lane].begin() + kSplit, copied[lane].end(), reference[lane].begin() + kSplit), "a copied state continues identically");
+    }
+
+    // A quarter-turn rotation multiplies the output by (-i)^turns and leaves the loop as it was:
+    // the QPSK phase detector does not tell the four lock points apart.
+    const std::array<std::int32_t, 4U> turns{0, 1, 2, -1};
+    Check(uni_simd_qpsk_costas4_rotate(rotated, turns.data()) == UNI_SIMD_RESULT_SUCCESS, "rotate");
+    auto turned = input;
+    Process(rotated, turned, kSplit, total - kSplit);
+    for (std::size_t lane = 0U; lane < 4U; ++lane) {
+        std::complex<float> factor{1.0f, 0.0f};
+        for (std::int32_t turn = 0; turn < (turns[lane] & 3); ++turn) {
+            factor *= std::complex<float>{0.0f, -1.0f};
+        }
+        for (std::size_t sample = kSplit; sample < total; sample += 97U) {
+            Check(std::abs(turned[lane][sample] - reference[lane][sample] * factor) < 1e-3f, "rotation turns the output");
+        }
+    }
+
+    // Coasting over a gap, the loops settle back onto the reference's trajectory (up to a lock
+    // point). Needs a signal the loop locks on: QPSK with a carrier offset well inside its range.
+    std::array<Channel, 4U> carrier;
+    std::uint32_t random = 7U;
+    for (std::size_t lane = 0U; lane < 4U; ++lane) {
+        carrier[lane].resize(total);
+        std::complex<float> symbol{};
+        for (std::size_t sample = 0U; sample < total; ++sample) {
+            if (sample % 4U == 0U) {
+                random = random * 1664525U + 1013904223U;
+                symbol = {(random >> 30U & 1U) != 0U ? 1.0f : -1.0f, (random >> 29U & 1U) != 0U ? 1.0f : -1.0f};
+            }
+            const double phase = 0.4 * static_cast<double>(lane) + 2e-5 * static_cast<double>(lane + 1U) * static_cast<double>(sample);
+            carrier[lane][sample] = symbol * std::polar(0.005f, static_cast<float>(std::remainder(phase, 2.0 * std::acos(-1.0))));
+        }
+    }
+    auto locked = carrier;
+    auto* const locked_serial = Create(UNI_SIMD_BACKEND_AUTOMATIC);
+    Process(locked_serial, locked, 0U, kSplit);
+    Check(uni_simd_kernel_copy_state(skipped, locked_serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
+    Process(locked_serial, locked, kSplit, total - kSplit);
+    constexpr std::size_t kGap = 60000U;
+    Check(uni_simd_qpsk_costas4_skip(skipped, kGap) == UNI_SIMD_RESULT_SUCCESS, "skip");
+    auto resumed = carrier;
+    Process(skipped, resumed, kSplit + kGap, total - kSplit - kGap);
+    for (std::size_t lane = 0U; lane < 4U; ++lane) {
+        std::complex<double> correlation{};
+        float spread = 0.0f;
+        for (std::size_t sample = total - 20000U; sample < total; ++sample) {
+            correlation += std::complex<double>(resumed[lane][sample]) * std::conj(std::complex<double>(locked[lane][sample]));
+            // Locked: the output lies on the axes-diagonal QPSK points, |re| == |im|.
+            spread = std::max(spread, std::abs(std::abs(locked[lane][sample].real()) - std::abs(locked[lane][sample].imag())) / std::abs(locked[lane][sample]));
+        }
+        Check(spread < 0.05f, "the reference loop is locked");
+        const double quarter = std::round(std::arg(correlation) / (std::acos(-1.0) / 2.0));
+        const auto factor = std::polar(1.0f, static_cast<float>(-quarter * std::acos(-1.0) / 2.0));
+        float worst = 0.0f;
+        for (std::size_t sample = total - 20000U; sample < total; ++sample) {
+            worst = std::max(worst, std::abs(resumed[lane][sample] * factor - locked[lane][sample]) / std::abs(locked[lane][sample]));
+        }
+        Check(worst < 1e-3f, "the coasted loop settles onto the reference");
+    }
+    Check(uni_simd_kernel_free(locked_serial) == UNI_SIMD_RESULT_SUCCESS);
+    for (auto* const kernel : {serial, copy, rotated, skipped}) {
+        Check(uni_simd_kernel_free(kernel) == UNI_SIMD_RESULT_SUCCESS);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -186,6 +275,7 @@ int main() {
     Check(uni_simd_kernel_execute(huge_phase, &empty, &huge_phase_state) == UNI_SIMD_RESULT_SUCCESS);
     Check(std::isfinite(huge_phase_state.phase[0]), "huge phase normalized");
     Check(uni_simd_kernel_free(huge_phase) == UNI_SIMD_RESULT_SUCCESS);
+    TestCopyStateSkipAndRotate();
     Check(uni_simd_finalize() == UNI_SIMD_RESULT_SUCCESS);
     return 0;
 }

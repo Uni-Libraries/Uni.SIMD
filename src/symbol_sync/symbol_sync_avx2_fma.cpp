@@ -166,8 +166,86 @@ template <bool Cubic, bool Clamp>
     }
 }
 
+/**
+ * Complex values of the four lanes packed as [re0 re1 re2 re3 | im0 im1 im2 im3], so that the
+ * speculative batch path (see Batch()) treats both components with one instruction.
+ */
+using Complex8 = __m256;
+
+[[nodiscard]] inline Complex8 Pack(const Complex4& value) noexcept { return _mm256_set_m128(value.im, value.re); }
+[[nodiscard]] inline Complex4 Unpack(const Complex8 value) noexcept { return {_mm256_castps256_ps128(value), _mm256_extractf128_ps(value, 1)}; }
+/** re + im of every lane. */
+[[nodiscard]] inline __m128 FoldComponents(const Complex8 value) noexcept { return _mm_add_ps(_mm256_castps256_ps128(value), _mm256_extractf128_ps(value, 1)); }
+
+/**
+ * Interpolation polynomial of every lane around a speculated sample index, in Farrow (Horner)
+ * form: y(mu) = x1 + mu (v1 + mu (v2 + mu v3)) with mu = t - base. It is the cubic Lagrange
+ * (or linear) interpolant of the four samples, arranged so that everything that depends on the
+ * samples is done before mu is known and only three multiply-adds remain after it.
+ */
+struct Farrow final {
+    Complex8 x1;
+    Complex8 v1;
+    Complex8 v2;
+    Complex8 v3;
+    /** Sample index the stencil is centred on, as a double. */
+    __m256d base;
+};
+
+/** Stencil around floor(`position`) of every lane, prepared for Evaluate(). */
+template <bool Cubic>
+[[nodiscard]] inline Farrow LoadFarrow(const Inputs& inputs, const __m256d position) noexcept {
+    const __m128i index = _mm256_cvttpd_epi32(position);
+    const auto load = [&](const std::size_t lane, const int sample) noexcept {
+        return _mm256_loadu_ps(inputs.data[lane] + 2U * static_cast<std::uint32_t>(sample) - 2U);
+    };
+    const __m256 s0 = load(0U, _mm_cvtsi128_si32(index));
+    const __m256 s1 = load(1U, _mm_extract_epi32(index, 1));
+    const __m256 s2 = load(2U, _mm_extract_epi32(index, 2));
+    const __m256 s3 = load(3U, _mm_extract_epi32(index, 3));
+    const __m256 low01 = _mm256_unpacklo_ps(s0, s1);
+    const __m256 high01 = _mm256_unpackhi_ps(s0, s1);
+    const __m256 low23 = _mm256_unpacklo_ps(s2, s3);
+    const __m256 high23 = _mm256_unpackhi_ps(s2, s3);
+    const __m256 re02 = _mm256_shuffle_ps(low01, low23, _MM_SHUFFLE(1, 0, 1, 0)); // [re of tap 0 | re of tap 2]
+    const __m256 im02 = _mm256_shuffle_ps(low01, low23, _MM_SHUFFLE(3, 2, 3, 2));
+    const __m256 re13 = _mm256_shuffle_ps(high01, high23, _MM_SHUFFLE(1, 0, 1, 0));
+    const __m256 im13 = _mm256_shuffle_ps(high01, high23, _MM_SHUFFLE(3, 2, 3, 2));
+    // Tap j of every lane as [re | im].
+    const Complex8 x1 = _mm256_permute2f128_ps(re13, im13, 0x20);
+    const Complex8 x2 = _mm256_permute2f128_ps(re02, im02, 0x31);
+    if constexpr (Cubic) {
+        const Complex8 x0 = _mm256_permute2f128_ps(re02, im02, 0x20);
+        const Complex8 x3 = _mm256_permute2f128_ps(re13, im13, 0x31);
+        // v3 = ((x3 - x0) + 3 (x1 - x2)) / 6, v2 = (x0 + x2) / 2 - x1, v1 = x2 - x1 / 2 - x0 / 3 - x3 / 6
+        return {.x1 = x1,
+                .v1 = _mm256_fmadd_ps(x3, _mm256_set1_ps(-1.0f / 6.0f),
+                                      _mm256_fmadd_ps(x0, _mm256_set1_ps(-1.0f / 3.0f), _mm256_fmadd_ps(x1, _mm256_set1_ps(-0.5f), x2))),
+                .v2 = _mm256_fmsub_ps(_mm256_add_ps(x0, x2), _mm256_set1_ps(0.5f), x1),
+                .v3 = _mm256_fmadd_ps(_mm256_sub_ps(x1, x2), _mm256_set1_ps(0.5f), _mm256_mul_ps(_mm256_sub_ps(x3, x0), _mm256_set1_ps(1.0f / 6.0f))),
+                .base = _mm256_cvtepi32_pd(index)};
+    } else {
+        return {.x1 = x1, .v1 = _mm256_sub_ps(x2, x1), .v2 = _mm256_setzero_ps(), .v3 = _mm256_setzero_ps(), .base = _mm256_cvtepi32_pd(index)};
+    }
+}
+
+template <bool Cubic>
+[[nodiscard]] inline Complex8 Evaluate(const Farrow& farrow, const __m128 mu4) noexcept {
+    const __m256 mu = _mm256_set_m128(mu4, mu4);
+    if constexpr (Cubic) {
+        return _mm256_fmadd_ps(mu, _mm256_fmadd_ps(mu, _mm256_fmadd_ps(mu, farrow.v3, farrow.v2), farrow.v1), farrow.x1);
+    } else {
+        return _mm256_fmadd_ps(mu, farrow.v1, farrow.x1);
+    }
+}
+
 struct LoopConstants final {
     __m256d limit;
+    /**
+     * Highest time at which a batch still takes a step: one symbol lower than `limit`, so the
+     * stencils it loads for the next symbol stay inside the data.
+     */
+    __m256d batch_limit;
     /** Lowest time whose Gardner mid-point stencil still starts inside the data. */
     __m256d lower_limit;
     __m256d omega_min;
@@ -214,8 +292,16 @@ struct Trajectory final {
 
 /**
  * Up to `steps` symbols for all four lanes with one detector, while every lane stays inside
- * [lower_limit, limit); returns the number of steps taken. With `LogErrors` the detector errors
- * and energies are logged for the lock tracking replay.
+ * [lower_limit, batch_limit); returns the number of steps taken. With `LogErrors` the detector
+ * errors and energies are logged for the lock tracking replay.
+ *
+ * Speculative stencils: the next symbol lies at t + omega + (alpha + beta) e, where the detector
+ * term moves it by a small fraction of a sample. Its stencil is therefore loaded from
+ * floor(t + omega), and turned into Farrow coefficients, while the current symbol's error is
+ * still being computed; once the exact position is known only mu = t - base and three
+ * multiply-adds remain on the recurrence. In the few steps where the correction crosses a
+ * sample boundary (mu outside [0, 1)) the symbol is interpolated again from the right stencil,
+ * so the result is the same interpolant as without speculation.
  *
  * A separate function on purpose: everything the loop carries arrives by value and lives in
  * locals, so it stays in registers. As part of Run(), whose general path indexes the pointer
@@ -227,24 +313,57 @@ template <bool Cubic, bool MuellerMuller, bool LogErrors>
                                     float* output2, float* output3, const std::size_t steps, float (*const error_log)[kSymbolSync4Lanes],
                                     float (*const energy_log)[kSymbolSync4Lanes]) noexcept {
     const LoopConstants k = constants;
+    const __m256d half = _mm256_set1_pd(0.5);
+    const __m128 zero = _mm_setzero_ps();
+    const __m128 one = _mm_set1_ps(1.0f);
     __m256d time = trajectory.time;
     __m256d omega = trajectory.omega;
-    __m256d mid_time = _mm256_fnmadd_pd(_mm256_set1_pd(0.5), omega, time);
+    __m256d mid_time = _mm256_fnmadd_pd(half, omega, time);
     Complex4 previous = trajectory.previous;
+
+    // Stencils of the symbol about to be decided; the first ones from exact positions.
+    Farrow stencil = LoadFarrow<Cubic>(inputs, time);
+    Farrow mid_stencil = MuellerMuller ? stencil : LoadFarrow<Cubic>(inputs, mid_time);
+    Complex8 previous8 = Pack(previous);
+    const __m256 sign_bit = _mm256_set1_ps(-0.0f);
+
     std::size_t done = 0U;
     do {
-        const Complex4 current = Interpolate<Cubic, false>(inputs, time);
+        // The next symbol's stencils, from positions that ignore this symbol's error.
+        const Farrow next_stencil = LoadFarrow<Cubic>(inputs, _mm256_add_pd(time, omega));
+        const Farrow next_mid_stencil = MuellerMuller ? next_stencil : LoadFarrow<Cubic>(inputs, _mm256_fmadd_pd(half, omega, time));
+
+        const __m128 mu = _mm256_cvtpd_ps(_mm256_sub_pd(time, stencil.base));
+        __m128 outside = _mm_or_ps(_mm_cmplt_ps(mu, zero), _mm_cmpge_ps(mu, one));
+        Complex8 current = Evaluate<Cubic>(stencil, mu);
+        Complex8 mid = current;
+        if constexpr (!MuellerMuller) {
+            const __m128 mid_mu = _mm256_cvtpd_ps(_mm256_sub_pd(mid_time, mid_stencil.base));
+            outside = _mm_or_ps(outside, _mm_or_ps(_mm_cmplt_ps(mid_mu, zero), _mm_cmpge_ps(mid_mu, one)));
+            mid = Evaluate<Cubic>(mid_stencil, mid_mu);
+        }
+        if (_mm_movemask_ps(outside) != 0) [[unlikely]] {
+            current = Pack(Interpolate<Cubic, false>(inputs, time));
+            if constexpr (!MuellerMuller) {
+                mid = Pack(Interpolate<Cubic, false>(inputs, mid_time));
+            }
+        }
+
         __m128 error4;
         if constexpr (MuellerMuller) {
-            error4 = MuellerMullerError(previous, current);
+            // sign(decision) * value flips value's sign bit with decision's.
+            const auto sign_times = [&](const Complex8 decision, const Complex8 value) noexcept {
+                return _mm256_xor_ps(value, _mm256_and_ps(sign_bit, decision));
+            };
+            error4 = FoldComponents(_mm256_sub_ps(sign_times(previous8, current), sign_times(current, previous8)));
             if constexpr (LogErrors) {
-                _mm_store_ps(energy_log[done], DetectorEnergy(previous, current, current, true));
+                _mm_store_ps(energy_log[done], FoldComponents(_mm256_fmadd_ps(previous8, previous8, _mm256_mul_ps(current, current))));
             }
         } else {
-            const Complex4 mid = Interpolate<Cubic, false>(inputs, mid_time);
-            error4 = GardnerError(previous, mid, current);
+            error4 = FoldComponents(_mm256_mul_ps(mid, _mm256_sub_ps(previous8, current)));
             if constexpr (LogErrors) {
-                _mm_store_ps(energy_log[done], DetectorEnergy(previous, mid, current, false));
+                const __m256 power = _mm256_fmadd_ps(previous8, previous8, _mm256_mul_ps(current, current));
+                _mm_store_ps(energy_log[done], FoldComponents(_mm256_fmadd_ps(mid, mid, power)));
             }
         }
         if constexpr (LogErrors) {
@@ -254,9 +373,13 @@ template <bool Cubic, bool MuellerMuller, bool LogErrors>
         time = next.time;
         omega = next.omega;
         mid_time = next.mid;
-        previous = current;
-        const __m128 low = _mm_unpacklo_ps(current.re, current.im);
-        const __m128 high = _mm_unpackhi_ps(current.re, current.im);
+        stencil = next_stencil;
+        mid_stencil = next_mid_stencil;
+        previous8 = current;
+        const __m128 re = _mm256_castps256_ps128(current);
+        const __m128 im = _mm256_extractf128_ps(current, 1);
+        const __m128 low = _mm_unpacklo_ps(re, im);
+        const __m128 high = _mm_unpackhi_ps(re, im);
         _mm_storel_pi(reinterpret_cast<__m64*>(output0), low);
         _mm_storeh_pi(reinterpret_cast<__m64*>(output1), low);
         _mm_storel_pi(reinterpret_cast<__m64*>(output2), high);
@@ -267,7 +390,8 @@ template <bool Cubic, bool MuellerMuller, bool LogErrors>
         output3 += 2;
         ++done;
     } while (done < steps &&
-             _mm256_movemask_pd(_mm256_and_pd(_mm256_cmp_pd(time, k.limit, _CMP_LT_OQ), _mm256_cmp_pd(time, k.lower_limit, _CMP_GE_OQ))) == 0xF);
+             _mm256_movemask_pd(_mm256_and_pd(_mm256_cmp_pd(time, k.batch_limit, _CMP_LT_OQ), _mm256_cmp_pd(time, k.lower_limit, _CMP_GE_OQ))) == 0xF);
+    previous = Unpack(previous8);
     trajectory = {time, omega, previous};
     return done;
 }
@@ -278,16 +402,20 @@ void Run(const SymbolSync4Params& params, SymbolSync4State& state, SymbolSync4Se
     alignas(16) std::int32_t last_index[kSymbolSync4Lanes];
     alignas(32) double lower[kSymbolSync4Lanes];
     alignas(32) double mid_gain[kSymbolSync4Lanes];
+    alignas(32) double batch_limit[kSymbolSync4Lanes];
     for (std::size_t lane = 0U; lane < kSymbolSync4Lanes; ++lane) {
         inputs.data[lane] = segments.data[lane];
         last_index[lane] = static_cast<std::int32_t>(segments.length[lane]) - 3;
         // Lowest time whose Gardner mid-point stencil still starts inside the data.
         lower[lane] = 0.5 * params.omega_max[lane] + 2.0;
         mid_gain[lane] = params.alpha_beta[lane] - 0.5 * params.beta[lane];
+        // Room for the next symbol's stencil, loaded one step ahead.
+        batch_limit[lane] = segments.limit[lane] - params.omega_max[lane] - 2.0;
     }
     inputs.last_index = _mm_load_si128(reinterpret_cast<const __m128i*>(last_index));
 
     const LoopConstants constants{.limit = _mm256_loadu_pd(segments.limit),
+                                  .batch_limit = _mm256_load_pd(batch_limit),
                                   .lower_limit = _mm256_load_pd(lower),
                                   .omega_min = _mm256_load_pd(params.omega_min),
                                   .omega_max = _mm256_load_pd(params.omega_max),
@@ -463,7 +591,9 @@ void Run(const SymbolSync4Params& params, SymbolSync4State& state, SymbolSync4Se
             break;
         }
         const bool uniform = mueller_muller_bits == 0 || mueller_muller_bits == 0xF;
-        if (active == 0xF && have_previous == 0xF && uniform && _mm256_movemask_pd(_mm256_cmp_pd(time, constants.lower_limit, _CMP_GE_OQ)) == 0xF) {
+        const bool batch_range = _mm256_movemask_pd(_mm256_and_pd(_mm256_cmp_pd(time, constants.lower_limit, _CMP_GE_OQ),
+                                                                  _mm256_cmp_pd(time, constants.batch_limit, _CMP_LT_OQ))) == 0xF;
+        if (active == 0xF && have_previous == 0xF && uniform && batch_range) {
             if constexpr (AutoTed) {
                 // A lane switches once its run count reaches the hold count, and a run grows by
                 // at most one per symbol: keep batches short enough that no lane gets there.

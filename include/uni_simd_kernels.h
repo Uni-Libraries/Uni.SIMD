@@ -112,5 +112,13 @@ enum {
      * output points to uni_simd_symbol_sync4_result_t. Symbols near the end of a block whose
      * interpolation needs samples of the next block are produced by the next call.
      */
-    UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32 = 17
+    UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32 = 17,
+
+    /**
+     * Stateful add-compare-select of a Viterbi decoder for the K = 7, rate 1/2 convolutional
+     * code (e.g. CCSDS 171/133). CONST_POINTER CONFIG must point to
+     * uni_simd_viterbi_k7r2_config_t. Input points to uni_simd_viterbi_k7r2_block_t and
+     * output points to uni_simd_viterbi_k7r2_result_t. Traceback is left to the caller.
+     */
+    UNI_SIMD_KERNEL_VITERBI_K7R2_U8 = 18
 };

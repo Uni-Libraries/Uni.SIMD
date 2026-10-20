@@ -1,8 +1,11 @@
 #include "costas_loop_internal.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <numbers>
 
 namespace uni::simd::kernels {
 
@@ -163,6 +166,66 @@ uni_simd_result_e QpskCostas4Execute(
     }
     if (final_state != nullptr) {
         *final_state = kernel.state;
+    }
+    return UNI_SIMD_RESULT_SUCCESS;
+}
+
+uni_simd_result_e QpskCostas4CopyState(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costas4_t& source) noexcept {
+    if (std::memcmp(&kernel.config, &source.config, sizeof(kernel.config)) != 0) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    kernel.state = source.state;
+    kernel.samples_since_normalization = source.samples_since_normalization;
+    return UNI_SIMD_RESULT_SUCCESS;
+}
+
+uni_simd_result_e QpskCostas4Skip(uni_simd_qpsk_costas4_t& kernel, const std::size_t sample_count) noexcept {
+    constexpr std::size_t delay = UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY;
+    auto& state = kernel.state;
+    const std::size_t applied = std::min(sample_count, delay);
+    for (std::size_t lane = 0U; lane < UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT; ++lane) {
+        // The steps already decided take effect first; every later sample, with no detector
+        // error, steps by the loop frequency alone. Summed in double: the gap can be long.
+        double phase = state.phase[lane];
+        for (std::size_t step = 0U; step < applied; ++step) {
+            phase += state.pending_step[step][lane];
+        }
+        const float frequency = state.frequency[lane];
+        phase += static_cast<double>(sample_count - applied) * static_cast<double>(frequency);
+        state.phase[lane] = static_cast<float>(std::remainder(phase, 2.0 * std::numbers::pi));
+        state.phase_cos[lane] = std::cos(state.phase[lane]);
+        state.phase_sin[lane] = std::sin(state.phase[lane]);
+        // The queue moves on by `applied` places and fills with frequency steps.
+        for (std::size_t slot = 0U; slot < delay; ++slot) {
+            if (slot + applied < delay) {
+                state.pending_step[slot][lane] = state.pending_step[slot + applied][lane];
+                state.pending_step_cos[slot][lane] = state.pending_step_cos[slot + applied][lane];
+                state.pending_step_sin[slot][lane] = state.pending_step_sin[slot + applied][lane];
+            } else {
+                state.pending_step[slot][lane] = frequency;
+                Costas4SinCos(frequency, state.pending_step_sin[slot][lane], state.pending_step_cos[slot][lane]);
+            }
+        }
+        state.last_error[lane] = 0.0f;
+    }
+    return UNI_SIMD_RESULT_SUCCESS;
+}
+
+uni_simd_result_e QpskCostas4Rotate(uni_simd_qpsk_costas4_t& kernel, const std::int32_t* const quarter_turns) noexcept {
+    if (quarter_turns == nullptr) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    auto& state = kernel.state;
+    for (std::size_t lane = 0U; lane < UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT; ++lane) {
+        // Multiplying the phasor by i^turns is exact: it swaps and negates components.
+        const auto turns = static_cast<std::uint32_t>(quarter_turns[lane]) & 3U;
+        for (std::uint32_t turn = 0U; turn < turns; ++turn) {
+            const float phase_cos = state.phase_cos[lane];
+            state.phase_cos[lane] = -state.phase_sin[lane];
+            state.phase_sin[lane] = phase_cos;
+        }
+        state.phase[lane] = std::remainder(state.phase[lane] + static_cast<float>(turns) * static_cast<float>(std::numbers::pi / 2.0),
+                                           2.0f * std::numbers::pi_v<float>);
     }
     return UNI_SIMD_RESULT_SUCCESS;
 }

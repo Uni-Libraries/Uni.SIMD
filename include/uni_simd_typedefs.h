@@ -183,7 +183,7 @@ typedef struct uni_simd_qpsk_costas4_block_t {
  * bandwidth far below 1 / DELAY, where a few samples of extra loop delay cost a negligible
  * phase margin.
  */
-#define UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY 2U
+#define UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY 4U
 
 /**
  * Loop state of the four-channel QPSK Costas kernel. `pending_*[k]` hold the steps decided but
@@ -336,12 +336,63 @@ typedef struct uni_simd_symbol_sync4_result_t {
     uint32_t truncated_mask;
     uni_simd_symbol_sync_ted_e ted[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
     double omega[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
+    /**
+     * Position of the next symbol in input samples, relative to the end of this block (it lies
+     * a little before it: symbols whose interpolation needs later samples wait for the next call).
+     */
+    double next_time[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
     double err_norm2_ema[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
     uint64_t symbols[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
     uint64_t ted_switches[UNI_SIMD_SYMBOL_SYNC4_CHANNEL_COUNT];
 } uni_simd_symbol_sync4_result_t;
 
 #define UNI_SIMD_SYMBOL_SYNC4_RESULT_DESCRIPTOR_SIZE sizeof(uni_simd_symbol_sync4_result_t)
+
+/**
+ * Viterbi decoder add-compare-select for the K = 7, rate 1/2 convolutional code.
+ *
+ * Conventions (those of the VOLK/Spiral decoders it replaces, so decisions are interchangeable):
+ *   - a state holds the last six input bits, the newest in bit 0;
+ *   - polynomials use the conventional notation (octal 171 and 133 for CCSDS): bit 6 taps the
+ *     newest input bit, bit 0 the oldest;
+ *   - soft symbols are bytes from 0 (certainly 0) to 255 (certainly 1), two per step, in the
+ *     order of the polynomials;
+ *   - the branch metric of a step is ((a ^ s0) + (b ^ s1) + 1) >> 3 for expected bits a, b as
+ *     0 / 255, from 0 to 63;
+ *   - bit j of a step's decision word is 1 when new state j was reached from old state
+ *     (j >> 1) + 32 (the path whose oldest bit is 1), including ties, and 0 when it came from
+ *     old state j >> 1.
+ * Path metrics are 16-bit and renormalised periodically, so they never saturate.
+ */
+typedef struct uni_simd_viterbi_k7r2_config_t {
+    size_t descriptor_size;
+    uint32_t polynomial_a;
+    uint32_t polynomial_b;
+    /** Nonzero: the encoder starts in state 0; the other states start `start_penalty` behind. */
+    uint32_t known_start_state;
+    uint32_t start_penalty;
+} uni_simd_viterbi_k7r2_config_t;
+
+#define UNI_SIMD_VITERBI_K7R2_CONFIG_DESCRIPTOR_SIZE sizeof(uni_simd_viterbi_k7r2_config_t)
+
+typedef struct uni_simd_viterbi_k7r2_block_t {
+    size_t descriptor_size;
+    /** Two soft symbols per step. */
+    const uint8_t* soft;
+    size_t steps;
+    /** One decision word per step. */
+    uint64_t* decisions;
+} uni_simd_viterbi_k7r2_block_t;
+
+#define UNI_SIMD_VITERBI_K7R2_BLOCK_DESCRIPTOR_SIZE sizeof(uni_simd_viterbi_k7r2_block_t)
+
+typedef struct uni_simd_viterbi_k7r2_result_t {
+    size_t descriptor_size;
+    /** State with the smallest path metric after the block (the lowest such state on ties). */
+    uint32_t best_state;
+} uni_simd_viterbi_k7r2_result_t;
+
+#define UNI_SIMD_VITERBI_K7R2_RESULT_DESCRIPTOR_SIZE sizeof(uni_simd_viterbi_k7r2_result_t)
 
 /** Parameter value. The field used by each ID is documented above. */
 typedef union uni_simd_param_val {

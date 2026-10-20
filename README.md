@@ -117,8 +117,8 @@ SIMD setup and permutation overhead is larger than the transform itself.
 ## Kernel Lifetime
 
 Every operation uses an opaque `uni_simd_kernel_t`. Primitive and IFFT instances
-hold configuration only. PFB, Costas, and carrier-analyzer instances additionally
-own streaming state.
+hold configuration only. PFB, Costas, symbol synchronizer, Viterbi and
+carrier-analyzer instances additionally own streaming state.
 
 Configure PFB through `uni_simd_kernel_param_set()` before its first execution.
 The first execution validates and copies the configuration and creates streaming
@@ -129,6 +129,16 @@ Costas and carrier-analyzer configuration is supplied through `UNI_SIMD_PARAM_CO
 and copied on first execution. `uni_simd_kernel_reset()` restores the Costas initial
 state or clears analyzer adjacency state. Creation parameters cannot be changed after
 streaming state exists.
+Streaming kernels can be split in time, so that two threads process the two halves of a
+block concurrently. `uni_simd_kernel_copy_state()` hands the complete state of one instance
+to another of the same configuration (PFB, Costas, symbol synchronizer). The second instance
+then moves to the middle of the block without producing output:
+`uni_simd_pfb_channelizer_advance()` consumes the first half exactly (the result is
+bit-identical to serial processing), while the loops of `uni_simd_symbol_sync4_skip()` and
+`uni_simd_qpsk_costas4_skip()` coast and need a warm-up before they follow the stream
+again. `uni_simd_qpsk_costas4_rotate()` moves a Costas loop onto another of the four QPSK
+lock points without disturbing it.
+
 `uni_simd_kernel_free()` accepts NULL as a successful no-op, and
 `uni_simd_finalize()` refuses to finalize while any kernel instance remains alive.
 

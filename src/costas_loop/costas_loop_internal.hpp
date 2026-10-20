@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 
 struct uni_simd_qpsk_costas4_t;
 
@@ -32,6 +33,12 @@ void Costas4SinCos(float delta, float& phase_sin, float& phase_cos) noexcept;
     uni_simd_qpsk_costas4_t& kernel,
     const uni_simd_qpsk_costas4_block_t& block,
     uni_simd_qpsk_costas4_state_t* final_state) noexcept;
+/** See uni_simd_kernel_copy_state(). */
+[[nodiscard]] uni_simd_result_e QpskCostas4CopyState(uni_simd_qpsk_costas4_t& kernel, const uni_simd_qpsk_costas4_t& source) noexcept;
+/** See uni_simd_qpsk_costas4_skip(). */
+[[nodiscard]] uni_simd_result_e QpskCostas4Skip(uni_simd_qpsk_costas4_t& kernel, std::size_t sample_count) noexcept;
+/** See uni_simd_qpsk_costas4_rotate(). */
+[[nodiscard]] uni_simd_result_e QpskCostas4Rotate(uni_simd_qpsk_costas4_t& kernel, const std::int32_t* quarter_turns) noexcept;
 
 } // namespace uni::simd::kernels
 

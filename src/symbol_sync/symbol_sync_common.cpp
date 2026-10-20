@@ -234,10 +234,57 @@ uni_simd_result_e SymbolSync4Execute(uni_simd_symbol_sync4_t& kernel, const uni_
         result.output_count[lane] = segments.output_count[lane];
         result.ted[lane] = state.mueller_muller[lane] != 0U ? UNI_SIMD_SYMBOL_SYNC_TED_MUELLER_MULLER : UNI_SIMD_SYMBOL_SYNC_TED_GARDNER;
         result.omega[lane] = state.omega[lane];
+        result.next_time[lane] = state.time[lane];
         result.err_norm2_ema[lane] = state.err_norm2_ema[lane];
         result.symbols[lane] = static_cast<std::uint64_t>(state.symbols[lane]);
         result.ted_switches[lane] = state.ted_switches[lane];
     }
+    return UNI_SIMD_RESULT_SUCCESS;
+}
+
+uni_simd_result_e SymbolSync4Skip(uni_simd_symbol_sync4_t& kernel, const uni_simd_symbol_sync4_block_t& block) noexcept {
+    if (block.descriptor_size != UNI_SIMD_SYMBOL_SYNC4_BLOCK_DESCRIPTOR_SIZE) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    constexpr std::size_t sample_bytes = 2U * sizeof(float);
+    auto& state = kernel.state;
+    const std::size_t history = kernel.history_length;
+    const double earliest = EarliestTime(kernel);
+    for (std::size_t lane = 0U; lane < kSymbolSync4Lanes; ++lane) {
+        const std::size_t count = block.input_count[lane];
+        if (count != 0U && (block.input[lane] == nullptr || !NaturallyAligned(block.input[lane]))) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        // History: the last `history` samples of (history, input).
+        if (count >= history) {
+            std::memcpy(kernel.history[lane], block.input[lane] + 2U * (count - history), history * sample_bytes);
+        } else if (count != 0U) {
+            std::memmove(kernel.history[lane], kernel.history[lane] + 2U * count, (history - count) * sample_bytes);
+            std::memcpy(kernel.history[lane] + 2U * (history - count), block.input[lane], count * sample_bytes);
+        }
+        // First symbol of the coasting grid at or after the end of the input, rebased onto it.
+        // The coasted symbols count towards the symbol counter (the detector switch needs a
+        // minimum number of symbols), as if they had been produced.
+        double& time = state.time[lane];
+        const double omega = state.omega[lane];
+        const auto end = static_cast<double>(count);
+        if (time < end) {
+            const double coasted = std::ceil((end - time) / omega);
+            time += coasted * omega;
+            state.symbols[lane] += coasted;
+        }
+        time = std::max(time - end, earliest);
+        state.have_previous[lane] = 0U;
+    }
+    return UNI_SIMD_RESULT_SUCCESS;
+}
+
+uni_simd_result_e SymbolSync4CopyState(uni_simd_symbol_sync4_t& kernel, const uni_simd_symbol_sync4_t& source) noexcept {
+    if (std::memcmp(&kernel.config, &source.config, sizeof(kernel.config)) != 0) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    kernel.state = source.state;
+    std::memcpy(kernel.history, source.history, sizeof(kernel.history));
     return UNI_SIMD_RESULT_SUCCESS;
 }
 

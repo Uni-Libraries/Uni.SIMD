@@ -97,6 +97,10 @@ void SymbolSync4SwitchTed(SymbolSync4State& state, std::size_t lane) noexcept;
 [[nodiscard]] uni_simd_result_e SymbolSync4Reset(uni_simd_symbol_sync4_t& kernel) noexcept;
 [[nodiscard]] uni_simd_result_e SymbolSync4Execute(uni_simd_symbol_sync4_t& kernel, const uni_simd_symbol_sync4_block_t& block,
                                                    uni_simd_symbol_sync4_result_t& result) noexcept;
+/** See uni_simd_symbol_sync4_skip(). */
+[[nodiscard]] uni_simd_result_e SymbolSync4Skip(uni_simd_symbol_sync4_t& kernel, const uni_simd_symbol_sync4_block_t& block) noexcept;
+/** See uni_simd_kernel_copy_state(). */
+[[nodiscard]] uni_simd_result_e SymbolSync4CopyState(uni_simd_symbol_sync4_t& kernel, const uni_simd_symbol_sync4_t& source) noexcept;
 
 } // namespace uni::simd::kernels
 

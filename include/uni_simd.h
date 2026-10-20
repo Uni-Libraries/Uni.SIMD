@@ -102,6 +102,8 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_free(uni_simd_kerne
  *   points to uni_simd_qpsk_carrier_analyzer_result_t.
  * - Symbol synchronizer input points to uni_simd_symbol_sync4_block_t and output
  *   points to uni_simd_symbol_sync4_result_t.
+ * - Viterbi input points to uni_simd_viterbi_k7r2_block_t and output points to
+ *   uni_simd_viterbi_k7r2_result_t; uni_simd_kernel_reset() restores the start metrics.
  * - uni_simd_kernel_reset() restores Costas or symbol synchronizer initial state
  *   (the synchronizer also forgets its sample history) or clears analyzer
  *   adjacency state.
@@ -139,6 +141,41 @@ UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_copy_state
  * two kernels filter the two halves of one block concurrently.
  */
 UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_advance(uni_simd_kernel_t* kernel, const uni_simd_const_buffer_t* input);
+
+/**
+ * Stateful kernels: take over the complete streaming state of `source`, an initialized kernel of
+ * the same kind and configuration, so that both continue identically from here. Supported for
+ * PFB channelizer, four-channel QPSK Costas and four-channel symbol synchronizer kernels. Returns INVALID_STATE before
+ * either kernel has state and INVALID_ARGUMENT for other kernels or differing configurations.
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_copy_state(uni_simd_kernel_t* kernel, const uni_simd_kernel_t* source);
+
+/**
+ * Four-channel symbol synchronizer: move past the input of `block` without producing symbols.
+ * The timing loops coast at their current omega (the next symbol lands on the extrapolated
+ * symbol grid, and the coasted symbols count as produced), the previous symbol is forgotten,
+ * and the end of the input becomes the history
+ * the next call interpolates from. Used to start a second instance part-way into a block, whose
+ * loops then settle on the stream within a few loop time constants. Outputs are ignored.
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_symbol_sync4_skip(uni_simd_kernel_t* kernel, const uni_simd_symbol_sync4_block_t* block);
+
+/**
+ * Four-channel QPSK Costas: move the loops past `sample_count` samples without processing them.
+ * The oscillator coasts: the steps already decided are applied, then every lane advances by its
+ * current frequency per sample, as the loop would with a zero phase error. Used to start a
+ * second instance part-way into a block, whose loops then settle on the carrier within a few
+ * loop time constants (on any of the four QPSK phase positions, see rotate).
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_qpsk_costas4_skip(uni_simd_kernel_t* kernel, size_t sample_count);
+
+/**
+ * Four-channel QPSK Costas: advance the oscillator phase of lane k by quarter_turns[k] * pi / 2
+ * (taken modulo 4). A Costas loop locks equally well on each of the four; this moves a loop to
+ * another one without disturbing it, and multiplies all later outputs of the lane by
+ * (-i)^quarter_turns[k]. Exact: the phasor components are swapped and negated.
+ */
+UNI_SIMD_API uni_simd_result_e UNI_SIMD_CALL uni_simd_qpsk_costas4_rotate(uni_simd_kernel_t* kernel, const int32_t* quarter_turns);
 
 #ifdef __cplusplus
 }

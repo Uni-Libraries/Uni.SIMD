@@ -287,6 +287,90 @@ void TestBackendsAgreeAndSplitInvariant() {
     Check(uni_simd_kernel_free(automatic) == UNI_SIMD_RESULT_SUCCESS, "free");
 }
 
+/** One execute call on samples [begin, end) of every channel; returns the result, appends the symbols. */
+uni_simd_symbol_sync4_result_t ExecuteRange(uni_simd_kernel_t* const kernel, const std::array<Channel, kLanes>& channels, const std::size_t begin,
+                                            const std::size_t end, std::array<Channel, kLanes>& symbols) {
+    uni_simd_symbol_sync4_block_t block{};
+    block.descriptor_size = UNI_SIMD_SYMBOL_SYNC4_BLOCK_DESCRIPTOR_SIZE;
+    std::array<Channel, kLanes> output;
+    for (std::size_t lane = 0U; lane < kLanes; ++lane) {
+        block.input[lane] = reinterpret_cast<const float*>(channels[lane].data() + begin);
+        block.input_count[lane] = end - begin;
+        output[lane].assign((end - begin) / 2U + 8U, Complex{});
+        block.output[lane] = reinterpret_cast<float*>(output[lane].data());
+        block.output_capacity[lane] = output[lane].size();
+    }
+    uni_simd_symbol_sync4_result_t result{};
+    result.descriptor_size = UNI_SIMD_SYMBOL_SYNC4_RESULT_DESCRIPTOR_SIZE;
+    Check(uni_simd_kernel_execute(kernel, &block, &result) == UNI_SIMD_RESULT_SUCCESS, "execute");
+    for (std::size_t lane = 0U; lane < kLanes; ++lane) {
+        symbols[lane].insert(symbols[lane].end(), output[lane].begin(), output[lane].begin() + static_cast<std::ptrdiff_t>(result.output_count[lane]));
+    }
+    return result;
+}
+
+void TestCopyStateAndSkip() {
+    // Without the M&M switch: a switch at a slightly different symbol would keep the two
+    // trajectories apart for a while, which is not what this test is about.
+    const LoopSettings settings{.auto_ted = false};
+    const auto channels = MakeChannels(200000U, settings.omega, 0.05f);
+    const auto config = MakeConfig(settings);
+    auto* const serial = Create(config, UNI_SIMD_BACKEND_AUTOMATIC);
+    auto* const copy = Create(config, UNI_SIMD_BACKEND_AUTOMATIC);
+    std::array<Channel, kLanes> serial_symbols;
+    std::array<Channel, kLanes> copy_symbols;
+    std::array<Channel, kLanes> discarded;
+    (void)ExecuteRange(serial, channels, 0U, 40000U, serial_symbols);
+    (void)ExecuteRange(copy, channels, 0U, 0U, discarded);
+    Check(uni_simd_kernel_copy_state(copy, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
+
+    // The copy continues exactly like the original.
+    const auto serial_result = ExecuteRange(serial, channels, 40000U, 80000U, serial_symbols);
+    const auto copy_result = ExecuteRange(copy, channels, 40000U, 80000U, copy_symbols);
+    for (std::size_t lane = 0U; lane < kLanes; ++lane) {
+        Check(copy_result.output_count[lane] == serial_result.output_count[lane] && copy_result.next_time[lane] == serial_result.next_time[lane],
+              "a copied state continues identically");
+        // The original's symbols of this call are the last ones it produced.
+        Check(std::equal(copy_symbols[lane].begin(), copy_symbols[lane].end(), serial_symbols[lane].end() - static_cast<std::ptrdiff_t>(copy_symbols[lane].size())),
+              "a copied state produces the same symbols");
+    }
+
+    // Skip most of the rest, settle, and the copy lands on the original's trajectory: the last
+    // symbols coincide and the symbol counters agree.
+    std::array<Channel, kLanes> serial_tail;
+    std::array<Channel, kLanes> copy_tail;
+    Check(uni_simd_kernel_copy_state(copy, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
+    const auto serial_end = ExecuteRange(serial, channels, 80000U, 200000U, serial_tail);
+    uni_simd_symbol_sync4_block_t skip{};
+    skip.descriptor_size = UNI_SIMD_SYMBOL_SYNC4_BLOCK_DESCRIPTOR_SIZE;
+    for (std::size_t lane = 0U; lane < kLanes; ++lane) {
+        skip.input[lane] = reinterpret_cast<const float*>(channels[lane].data() + 80000U);
+        skip.input_count[lane] = 60000U;
+    }
+    Check(uni_simd_symbol_sync4_skip(copy, &skip) == UNI_SIMD_RESULT_SUCCESS, "skip");
+    const auto copy_end = ExecuteRange(copy, channels, 140000U, 200000U, copy_tail);
+    for (std::size_t lane = 0U; lane < kLanes; ++lane) {
+        Check(std::abs(copy_end.next_time[lane] - serial_end.next_time[lane]) < 1e-3, "the settled copy has the original's symbol grid");
+        Check(copy_end.symbols[lane] + 1U >= serial_end.symbols[lane] && copy_end.symbols[lane] <= serial_end.symbols[lane] + 1U, "skipped symbols are counted");
+        const std::size_t compare = 5000U;
+        Check(serial_tail[lane].size() > compare && copy_tail[lane].size() > compare, "enough symbols");
+        const Channel serial_last(serial_tail[lane].end() - compare, serial_tail[lane].end());
+        const Channel copy_last(copy_tail[lane].end() - compare, copy_tail[lane].end());
+        Check(MaxDifference(serial_last, copy_last) < 1e-4f, "the settled copy produces the original's symbols");
+    }
+
+    // Kernels of another configuration cannot share state.
+    auto other_settings = settings;
+    other_settings.loop_bw = 0.004;
+    const auto other_config = MakeConfig(other_settings);
+    auto* const other = Create(other_config, UNI_SIMD_BACKEND_AUTOMATIC);
+    (void)ExecuteRange(other, channels, 0U, 0U, discarded);
+    Check(uni_simd_kernel_copy_state(other, serial) == UNI_SIMD_RESULT_INVALID_ARGUMENT, "configurations must match");
+    for (auto* const kernel : {serial, copy, other}) {
+        Check(uni_simd_kernel_free(kernel) == UNI_SIMD_RESULT_SUCCESS, "free");
+    }
+}
+
 void TestAcquiresTimingAndSwitchesDetector() {
     // Gardner's own pattern noise on this signal keeps err_norm2 around 0.01.
     const LoopSettings settings{.mm_threshold = 0.02, .fallback_threshold = 0.2};
@@ -360,6 +444,7 @@ int main() {
     }
     TestBackendsAgreeAndSplitInvariant();
     TestAcquiresTimingAndSwitchesDetector();
+    TestCopyStateAndSkip();
     TestValidation();
     Check(uni_simd_finalize() == UNI_SIMD_RESULT_SUCCESS, "finalize");
     std::puts("symbol_sync4 tests passed");

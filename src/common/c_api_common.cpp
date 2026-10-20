@@ -4,6 +4,7 @@
 #include "costas_loop/costas_loop_internal.hpp"
 #include "qpsk_carrier_analyzer/qpsk_carrier_analyzer_internal.hpp"
 #include "symbol_sync/symbol_sync_internal.hpp"
+#include "viterbi/viterbi_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -110,6 +111,7 @@ struct uni_simd_kernel_t final {
     std::optional<uni_simd_qpsk_costas4_t> costas4;
     std::optional<uni_simd_qpsk_carrier_analyzer_t> carrier_analyzer;
     std::optional<uni_simd_symbol_sync4_t> symbol_sync4;
+    std::optional<uni_simd_viterbi_k7r2_t> viterbi_k7r2;
 };
 
 namespace {
@@ -142,6 +144,7 @@ namespace {
     case UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32:
     case UNI_SIMD_KERNEL_QPSK_CARRIER_ANALYZER_CF32:
     case UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32:
+    case UNI_SIMD_KERNEL_VITERBI_K7R2_U8:
         return id == UNI_SIMD_PARAM_CONFIG;
     default:
         return false;
@@ -150,7 +153,7 @@ namespace {
 
 [[nodiscard]] bool state_created(const uni_simd_kernel_t& kernel) noexcept {
     return kernel.pfb.has_value() || kernel.costas4.has_value() || kernel.carrier_analyzer.has_value() ||
-           kernel.symbol_sync4.has_value();
+           kernel.symbol_sync4.has_value() || kernel.viterbi_k7r2.has_value();
 }
 
 [[nodiscard]] bool is_creation_parameter(const uni_simd_kernel_e kernel,
@@ -729,6 +732,29 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     return result;
 }
 
+[[nodiscard]] uni_simd_result_e execute_viterbi_k7r2(uni_simd_kernel_t& kernel, const void* const input, void* const output) noexcept {
+    if (input == nullptr || output == nullptr || !naturally_aligned<uni_simd_viterbi_k7r2_block_t>(input) ||
+        !naturally_aligned<uni_simd_viterbi_k7r2_result_t>(output) || !kernel.params.has_config || kernel.params.config == nullptr ||
+        !naturally_aligned<uni_simd_viterbi_k7r2_config_t>(kernel.params.config)) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    if (!kernel.viterbi_k7r2) {
+        auto& created = kernel.viterbi_k7r2.emplace();
+        const auto result = uni::simd::kernels::ViterbiK7R2Initialize(created, *static_cast<const uni_simd_viterbi_k7r2_config_t*>(kernel.params.config),
+                                                                       kernel.params.backend);
+        if (result != UNI_SIMD_RESULT_SUCCESS) {
+            kernel.viterbi_k7r2.reset();
+            return result;
+        }
+    }
+    const auto block = *static_cast<const uni_simd_viterbi_k7r2_block_t*>(input);
+    const auto result = uni::simd::kernels::ViterbiK7R2Execute(*kernel.viterbi_k7r2, block, *static_cast<uni_simd_viterbi_k7r2_result_t*>(output));
+    if (result == UNI_SIMD_RESULT_SUCCESS) {
+        set_resolved_backend(kernel.params, static_cast<uni::simd::Backend>(kernel.viterbi_k7r2->backend));
+    }
+    return result;
+}
+
 [[nodiscard]] uni_simd_result_e execute_carrier_analyzer(uni_simd_kernel_t& kernel,
                                                          const void* const input,
                                                          void* const output) noexcept {
@@ -800,7 +826,7 @@ uni_simd_kernel_t* UNI_SIMD_CALL uni_simd_kernel_create(const uni_simd_kernel_e 
         auto& active = runtime();
         const std::lock_guard lock{active.mutex};
         if (!active.initialized.load(std::memory_order_relaxed) || kernel <= UNI_SIMD_KERNEL_UNKNOWN ||
-            kernel > UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32) {
+            kernel > UNI_SIMD_KERNEL_VITERBI_K7R2_U8) {
             return nullptr;
         }
         auto* const created = new (std::nothrow) uni_simd_kernel_t{.id = kernel};
@@ -884,6 +910,10 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_reset(uni_simd_kernel_t* const k
             return kernel->symbol_sync4
                        ? uni::simd::kernels::SymbolSync4Reset(*kernel->symbol_sync4)
                        : UNI_SIMD_RESULT_INVALID_STATE;
+        case UNI_SIMD_KERNEL_VITERBI_K7R2_U8:
+            return kernel->viterbi_k7r2
+                       ? uni::simd::kernels::ViterbiK7R2Reset(*kernel->viterbi_k7r2)
+                       : UNI_SIMD_RESULT_INVALID_STATE;
         default:
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
@@ -902,6 +932,74 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_copy_state(uni_simd_ker
             return UNI_SIMD_RESULT_INVALID_STATE;
         }
         return to_c(kernel->pfb->copy_state_from(*source->pfb));
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_copy_state(uni_simd_kernel_t* const kernel, const uni_simd_kernel_t* const source) {
+    try {
+        if (kernel == nullptr || source == nullptr || kernel->id != source->id) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        switch (kernel->id) {
+        case UNI_SIMD_KERNEL_PFB_CHANNELIZER_CF32:
+            return uni_simd_pfb_channelizer_copy_state(kernel, source);
+        case UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32:
+            if (!kernel->symbol_sync4 || !source->symbol_sync4) {
+                return UNI_SIMD_RESULT_INVALID_STATE;
+            }
+            return uni::simd::kernels::SymbolSync4CopyState(*kernel->symbol_sync4, *source->symbol_sync4);
+        case UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32:
+            if (!kernel->costas4 || !source->costas4) {
+                return UNI_SIMD_RESULT_INVALID_STATE;
+            }
+            return uni::simd::kernels::QpskCostas4CopyState(*kernel->costas4, *source->costas4);
+        default:
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+uni_simd_result_e UNI_SIMD_CALL uni_simd_symbol_sync4_skip(uni_simd_kernel_t* const kernel, const uni_simd_symbol_sync4_block_t* const block) {
+    try {
+        if (kernel == nullptr || block == nullptr || kernel->id != UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (!kernel->symbol_sync4) {
+            return UNI_SIMD_RESULT_INVALID_STATE;
+        }
+        return uni::simd::kernels::SymbolSync4Skip(*kernel->symbol_sync4, *block);
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+uni_simd_result_e UNI_SIMD_CALL uni_simd_qpsk_costas4_skip(uni_simd_kernel_t* const kernel, const size_t sample_count) {
+    try {
+        if (kernel == nullptr || kernel->id != UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (!kernel->costas4) {
+            return UNI_SIMD_RESULT_INVALID_STATE;
+        }
+        return uni::simd::kernels::QpskCostas4Skip(*kernel->costas4, sample_count);
+    } catch (...) {
+        return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+}
+
+uni_simd_result_e UNI_SIMD_CALL uni_simd_qpsk_costas4_rotate(uni_simd_kernel_t* const kernel, const int32_t* const quarter_turns) {
+    try {
+        if (kernel == nullptr || kernel->id != UNI_SIMD_KERNEL_QPSK_COSTAS4_CF32) {
+            return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+        }
+        if (!kernel->costas4) {
+            return UNI_SIMD_RESULT_INVALID_STATE;
+        }
+        return uni::simd::kernels::QpskCostas4Rotate(*kernel->costas4, quarter_turns);
     } catch (...) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
@@ -972,6 +1070,9 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_kernel_execute(uni_simd_kernel_t* const
         }
         if (kernel->id == UNI_SIMD_KERNEL_SYMBOL_SYNC4_CF32) {
             return execute_symbol_sync4(*kernel, input, output);
+        }
+        if (kernel->id == UNI_SIMD_KERNEL_VITERBI_K7R2_U8) {
+            return execute_viterbi_k7r2(*kernel, input, output);
         }
         return execute_stateless(kernel->id, input, output, kernel->params, *context);
     } catch (const std::bad_alloc&) {
