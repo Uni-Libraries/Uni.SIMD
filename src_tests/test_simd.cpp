@@ -7,6 +7,7 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <complex>
 #include <cstdint>
 #include <limits>
@@ -86,7 +87,12 @@ void test_backends_match_generic_for_all_lengths(const uni::simd::Context& gener
             std::vector<std::uint8_t> actual_soft(2U * length);
             assert(generic.quantize_interleaved_cf32_u8(expected_soft, samples, {.scale = 50.0f}) == Result::success);
             assert(forced->quantize_interleaved_cf32_u8(actual_soft, samples, {.scale = 50.0f}) == Result::success);
-            assert(actual_soft == expected_soft);
+            // Fast backends are not bit-stable against generic (README: deterministic math mode selects generic): GCC
+            // may fuse the intrinsic multiply and add into an FMA, which moves values sitting on a rounding tie by one
+            // code. Anything beyond one code is a real mismatch.
+            for (std::size_t index = 0U; index < actual_soft.size(); ++index) {
+                assert(std::abs(static_cast<int>(actual_soft[index]) - static_cast<int>(expected_soft[index])) <= 1);
+            }
 
             std::vector<float> expected_power(length);
             std::vector<float> actual_power(length);
