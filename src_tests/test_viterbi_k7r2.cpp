@@ -27,7 +27,8 @@ constexpr std::uint32_t kStartPenalty = 31U;
 /** CCSDS-style encoder: the newest bit enters at bit 6 of the register. */
 [[nodiscard]] std::vector<std::uint8_t> Encode(const std::vector<std::uint8_t>& bits, const double noise, const unsigned seed) {
     std::mt19937 rng(seed);
-    std::normal_distribution<double> gaussian(0.0, noise);
+    // The standard deviation must be positive even when no noise is drawn (noise == 0).
+    std::normal_distribution<double> gaussian(0.0, noise > 0.0 ? noise : 1.0);
     std::vector<std::uint8_t> soft;
     std::uint32_t memory = 0U;
     for (const auto bit : bits) {
@@ -156,6 +157,19 @@ int main() {
     uni_simd_viterbi_k7r2_result_t result{};
     result.descriptor_size = UNI_SIMD_VITERBI_K7R2_RESULT_DESCRIPTOR_SIZE;
     Check(uni_simd_kernel_execute(kernel, &block, &result) == UNI_SIMD_RESULT_INVALID_ARGUMENT, "an 8-bit polynomial is rejected");
+
+    // A first execution that fails on its block creates no state either: the configuration can
+    // still be replaced, and reset reports that there is nothing to reset.
+    uni_simd_viterbi_k7r2_config_t good = bad;
+    good.polynomial_a = kPolynomialA;
+    Check(uni_simd_kernel_param_set(kernel, {UNI_SIMD_PARAM_CONFIG, {.const_pointer = &good}}) == UNI_SIMD_RESULT_SUCCESS, "params");
+    uni_simd_viterbi_k7r2_block_t bad_block{0U, nullptr, 0U, nullptr};
+    Check(uni_simd_kernel_execute(kernel, &bad_block, &result) == UNI_SIMD_RESULT_INVALID_ARGUMENT, "a block without descriptor size is rejected");
+    Check(uni_simd_kernel_reset(kernel) == UNI_SIMD_RESULT_INVALID_STATE, "a failed first execution creates no state");
+    Check(uni_simd_kernel_param_set(kernel, {UNI_SIMD_PARAM_CONFIG, {.const_pointer = &good}}) == UNI_SIMD_RESULT_SUCCESS,
+          "the configuration can be replaced after a failed first execution");
+    Check(uni_simd_kernel_execute(kernel, &block, &result) == UNI_SIMD_RESULT_SUCCESS, "a valid first execution creates state");
+    Check(uni_simd_kernel_reset(kernel) == UNI_SIMD_RESULT_SUCCESS, "reset after state creation");
     Check(uni_simd_kernel_free(kernel) == UNI_SIMD_RESULT_SUCCESS, "free");
 
     Check(uni_simd_finalize() == UNI_SIMD_RESULT_SUCCESS, "finalize");

@@ -50,6 +50,11 @@ function(uni_simd_configure_isa_sources target source_root)
         set(target_aarch64 ON)
     endif()
 
+    # Baseline sources must stay ahead of the ISA-specific ones. Inline functions shared through
+    # internal headers (and standard library templates) are emitted as COMDAT copies by every
+    # translation unit that does not inline them, each compiled with that unit's ISA flags; the
+    # linker keeps the first copy it loads. Listing baseline objects first makes that the copy
+    # without AVX/AVX-512 instructions, which every dispatch path may safely call.
     target_sources(${target} PRIVATE ${profile_COMMON} ${profile_GENERIC})
     if(MSVC)
         set_property(SOURCE ${profile_GENERIC} APPEND PROPERTY COMPILE_OPTIONS /fp:strict)

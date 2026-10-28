@@ -318,6 +318,11 @@ int main(void) {
         pfb_input_samples, SIZE_MAX / (2U * sizeof(float)) + 1U,
     };
     assert(uni_simd_kernel_execute(kernel, &overflowing_input, NULL) == UNI_SIMD_RESULT_INVALID_SIZE);
+    /* Advancing over a count whose float count wraps must fail rather than consume a wrapped length. */
+    assert(uni_simd_pfb_channelizer_advance(kernel, &overflowing_input) == UNI_SIMD_RESULT_INVALID_SIZE);
+    const uni_simd_const_buffer_t wrapping_input = {pfb_input_samples, SIZE_MAX / 2U + 2U};
+    assert(uni_simd_pfb_channelizer_advance(kernel, &wrapping_input) == UNI_SIMD_RESULT_INVALID_SIZE);
+    assert(uni_simd_pfb_channelizer_advance(kernel, &pfb_input) == UNI_SIMD_RESULT_SUCCESS);
     free_kernel(kernel);
 
     assert(uni_simd_finalize() == UNI_SIMD_RESULT_SUCCESS);

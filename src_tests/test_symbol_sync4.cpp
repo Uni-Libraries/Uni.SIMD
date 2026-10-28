@@ -429,6 +429,55 @@ void TestValidation() {
     Check(uni_simd_kernel_free(kernel) == UNI_SIMD_RESULT_SUCCESS, "free");
 }
 
+void TestFailedCallsLeaveStateUnchanged() {
+    const LoopSettings settings{.auto_ted = false};
+    const auto config = MakeConfig(settings);
+
+    // A first execution that fails creates no state: the configuration can still be replaced.
+    auto* const fresh = Create(config, UNI_SIMD_BACKEND_AUTOMATIC);
+    uni_simd_symbol_sync4_block_t bad_block{};
+    uni_simd_symbol_sync4_result_t result{};
+    result.descriptor_size = UNI_SIMD_SYMBOL_SYNC4_RESULT_DESCRIPTOR_SIZE;
+    Check(uni_simd_kernel_execute(fresh, &bad_block, &result) == UNI_SIMD_RESULT_INVALID_ARGUMENT, "a block without descriptor size is rejected");
+    Check(uni_simd_kernel_reset(fresh) == UNI_SIMD_RESULT_INVALID_STATE, "a failed first execution creates no state");
+    const auto other_config = MakeConfig(LoopSettings{.loop_bw = 0.004, .auto_ted = false});
+    Check(uni_simd_kernel_param_set(fresh, {UNI_SIMD_PARAM_CONFIG, {.const_pointer = &other_config}}) == UNI_SIMD_RESULT_SUCCESS,
+          "the configuration can be replaced after a failed first execution");
+    Check(uni_simd_kernel_free(fresh) == UNI_SIMD_RESULT_SUCCESS, "free");
+
+    const auto channels = MakeChannels(40000U, settings.omega, 0.05f);
+    auto* const reference = Create(config, UNI_SIMD_BACKEND_GENERIC);
+    auto* const probed = Create(config, UNI_SIMD_BACKEND_GENERIC);
+    std::array<Channel, kLanes> reference_symbols;
+    std::array<Channel, kLanes> probed_symbols;
+    (void)ExecuteRange(reference, channels, 0U, 20000U, reference_symbols);
+    (void)ExecuteRange(probed, channels, 0U, 20000U, probed_symbols);
+
+    // A skip rejected for its last lane must not have moved the lanes before it.
+    uni_simd_symbol_sync4_block_t skip{};
+    skip.descriptor_size = UNI_SIMD_SYMBOL_SYNC4_BLOCK_DESCRIPTOR_SIZE;
+    for (std::size_t lane = 0U; lane + 1U < kLanes; ++lane) {
+        skip.input[lane] = reinterpret_cast<const float*>(channels[lane].data() + 20000U);
+        skip.input_count[lane] = 5000U;
+    }
+    skip.input[kLanes - 1U] = nullptr;
+    skip.input_count[kLanes - 1U] = 5000U;
+    Check(uni_simd_symbol_sync4_skip(probed, &skip) == UNI_SIMD_RESULT_INVALID_ARGUMENT, "a skip with a missing input is rejected");
+    // Copying a kernel's state onto itself changes nothing.
+    Check(uni_simd_kernel_copy_state(probed, probed) == UNI_SIMD_RESULT_SUCCESS, "self copy");
+
+    const auto reference_result = ExecuteRange(reference, channels, 20000U, 40000U, reference_symbols);
+    const auto probed_result = ExecuteRange(probed, channels, 20000U, 40000U, probed_symbols);
+    for (std::size_t lane = 0U; lane < kLanes; ++lane) {
+        Check(probed_result.next_time[lane] == reference_result.next_time[lane] && probed_result.symbols[lane] == reference_result.symbols[lane],
+              "rejected calls leave the loop state unchanged");
+        Check(probed_symbols[lane] == reference_symbols[lane], "rejected calls leave the history unchanged");
+    }
+    for (auto* const kernel : {reference, probed}) {
+        Check(uni_simd_kernel_free(kernel) == UNI_SIMD_RESULT_SUCCESS, "free");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -446,6 +495,7 @@ int main() {
     TestAcquiresTimingAndSwitchesDetector();
     TestCopyStateAndSkip();
     TestValidation();
+    TestFailedCallsLeaveStateUnchanged();
     Check(uni_simd_finalize() == UNI_SIMD_RESULT_SUCCESS, "finalize");
     std::puts("symbol_sync4 tests passed");
     return 0;

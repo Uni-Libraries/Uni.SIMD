@@ -10,7 +10,113 @@
 #include <complex>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <span>
+#include <vector>
+
+namespace {
+
+/**
+ * Every backend against generic for every length up to a few vector widths, so each main loop,
+ * each partial-vector step and each scalar tail runs. Buffers are heap allocations of the exact
+ * size, so a sanitizer build reports any vector access past the end of an input or output.
+ * Byte inputs take all values (not only 0/1), which the bit packers must mask identically.
+ */
+void test_backends_match_generic_for_all_lengths(const uni::simd::Context& generic) {
+    using uni::simd::Backend;
+    using uni::simd::Result;
+    constexpr std::size_t max_length = 300U;
+    std::mt19937 rng(1234U);
+    std::uniform_int_distribution<int> byte(0, 255);
+    std::uniform_real_distribution<float> value(-3.0f, 3.0f);
+
+    for (const auto backend : {Backend::sse2, Backend::avx2, Backend::avx2_fma, Backend::avx512, Backend::neon}) {
+        const auto forced = uni::simd::create_context({.backend = backend});
+        if (!forced.has_value()) {
+            assert(forced.error() == Result::unsupported_backend);
+            continue;
+        }
+        for (std::size_t length = 0U; length <= max_length; ++length) {
+            std::vector<std::uint8_t> bytes(length);
+            for (auto& item : bytes) {
+                item = static_cast<std::uint8_t>(byte(rng));
+            }
+            std::vector<std::uint8_t> expected(length);
+            std::vector<std::uint8_t> actual(length);
+            assert(generic.invert_lsb(expected, bytes) == Result::success);
+            assert(forced->invert_lsb(actual, bytes) == Result::success);
+            assert(actual == expected);
+            auto in_place = bytes;
+            assert(forced->invert_lsb(in_place, in_place) == Result::success);
+            assert(in_place == expected);
+            assert(generic.invert_bytes(expected, bytes) == Result::success);
+            assert(forced->invert_bytes(actual, bytes) == Result::success);
+            assert(actual == expected);
+            in_place = bytes;
+            assert(forced->invert_bytes(in_place, in_place) == Result::success);
+            assert(in_place == expected);
+
+            std::vector<std::uint8_t> bits(8U * length);
+            for (auto& item : bits) {
+                item = static_cast<std::uint8_t>(byte(rng));
+            }
+            assert(generic.pack_bits_lsb(expected, bits) == Result::success);
+            assert(forced->pack_bits_lsb(actual, bits) == Result::success);
+            assert(actual == expected);
+            assert(generic.pack_bits_msb(expected, bits) == Result::success);
+            assert(forced->pack_bits_msb(actual, bits) == Result::success);
+            assert(actual == expected);
+
+            std::vector<std::uint8_t> expected_bits(8U * length);
+            std::vector<std::uint8_t> actual_bits(8U * length);
+            assert(generic.unpack_bits_lsb(expected_bits, bytes) == Result::success);
+            assert(forced->unpack_bits_lsb(actual_bits, bytes) == Result::success);
+            assert(actual_bits == expected_bits);
+            assert(generic.unpack_bits_msb(expected_bits, bytes) == Result::success);
+            assert(forced->unpack_bits_msb(actual_bits, bytes) == Result::success);
+            assert(actual_bits == expected_bits);
+
+            std::vector<std::complex<float>> samples(length);
+            std::vector<float> taps(length);
+            for (std::size_t index = 0U; index < length; ++index) {
+                samples[index] = {value(rng), value(rng)};
+                taps[index] = value(rng);
+            }
+            std::vector<std::uint8_t> expected_soft(2U * length);
+            std::vector<std::uint8_t> actual_soft(2U * length);
+            assert(generic.quantize_interleaved_cf32_u8(expected_soft, samples, {.scale = 50.0f}) == Result::success);
+            assert(forced->quantize_interleaved_cf32_u8(actual_soft, samples, {.scale = 50.0f}) == Result::success);
+            assert(actual_soft == expected_soft);
+
+            std::vector<float> expected_power(length);
+            std::vector<float> actual_power(length);
+            assert(generic.magnitude_squared(expected_power, samples, 3.0f) == Result::success);
+            assert(forced->magnitude_squared(actual_power, samples, 3.0f) == Result::success);
+            for (std::size_t index = 0U; index < length; ++index) {
+                assert(std::abs(actual_power[index] - expected_power[index]) <= 1.0e-6f * expected_power[index]);
+            }
+            assert(generic.power_spectral_density(expected_power, samples, 3.0f, 250.0f) == Result::success);
+            assert(forced->power_spectral_density(actual_power, samples, 3.0f, 250.0f) == Result::success);
+            for (std::size_t index = 0U; index < length; ++index) {
+                assert(std::abs(actual_power[index] - expected_power[index]) <= 1.0e-6f * expected_power[index]);
+            }
+
+            std::complex<float> expected_dot{};
+            std::complex<float> actual_dot{};
+            assert(generic.dot_cf32_f32(expected_dot, samples, taps) == Result::success);
+            assert(forced->dot_cf32_f32(actual_dot, samples, taps) == Result::success);
+            assert(std::abs(actual_dot - expected_dot) <= 1.0e-4f * (1.0f + static_cast<float>(length)));
+            if (length % 2U == 1U) {
+                const auto pairs = std::span<const float>{taps}.first(length / 2U);
+                assert(generic.dot_symmetric_cf32_f32(expected_dot, samples, pairs, 0.75f) == Result::success);
+                assert(forced->dot_symmetric_cf32_f32(actual_dot, samples, pairs, 0.75f) == Result::success);
+                assert(std::abs(actual_dot - expected_dot) <= 1.0e-4f * (1.0f + static_cast<float>(length)));
+            }
+        }
+    }
+}
+
+} // namespace
 
 int main() {
     using uni::simd::Backend;
@@ -150,5 +256,7 @@ int main() {
 
     assert(generic.pack_bits_lsb({}, {}) == Result::success);
     assert(generic.unpack_bits_lsb({}, {}) == Result::success);
+
+    test_backends_match_generic_for_all_lengths(generic);
     return 0;
 }

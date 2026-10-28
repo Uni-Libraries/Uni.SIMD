@@ -250,11 +250,14 @@ uni_simd_result_e SymbolSync4Skip(uni_simd_symbol_sync4_t& kernel, const uni_sim
     auto& state = kernel.state;
     const std::size_t history = kernel.history_length;
     const double earliest = EarliestTime(kernel);
+    // Validate every lane first: a rejected call leaves the state untouched.
     for (std::size_t lane = 0U; lane < kSymbolSync4Lanes; ++lane) {
-        const std::size_t count = block.input_count[lane];
-        if (count != 0U && (block.input[lane] == nullptr || !NaturallyAligned(block.input[lane]))) {
+        if (block.input_count[lane] != 0U && (block.input[lane] == nullptr || !NaturallyAligned(block.input[lane]))) {
             return UNI_SIMD_RESULT_INVALID_ARGUMENT;
         }
+    }
+    for (std::size_t lane = 0U; lane < kSymbolSync4Lanes; ++lane) {
+        const std::size_t count = block.input_count[lane];
         // History: the last `history` samples of (history, input).
         if (count >= history) {
             std::memcpy(kernel.history[lane], block.input[lane] + 2U * (count - history), history * sample_bytes);
@@ -282,6 +285,10 @@ uni_simd_result_e SymbolSync4Skip(uni_simd_symbol_sync4_t& kernel, const uni_sim
 uni_simd_result_e SymbolSync4CopyState(uni_simd_symbol_sync4_t& kernel, const uni_simd_symbol_sync4_t& source) noexcept {
     if (std::memcmp(&kernel.config, &source.config, sizeof(kernel.config)) != 0) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
+    }
+    if (&kernel == &source) {
+        // Nothing to copy, and memcpy must not be given overlapping buffers.
+        return UNI_SIMD_RESULT_SUCCESS;
     }
     kernel.state = source.state;
     std::memcpy(kernel.history, source.history, sizeof(kernel.history));

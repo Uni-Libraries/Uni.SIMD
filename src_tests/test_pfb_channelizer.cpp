@@ -557,7 +557,8 @@ void test_forked_tail_matches_whole_block() {
     const auto input = make_input(8192U + 777U);
     constexpr std::array<std::int32_t, 4U> exact_bins{-2, -1, 0, 1};
     constexpr std::array<std::int32_t, 3U> other_bins{-4, 0, 3};
-    for (const auto backend : {uni::simd::Backend::automatic, uni::simd::Backend::generic, uni::simd::Backend::avx2_fma}) {
+    for (const auto backend : {uni::simd::Backend::automatic, uni::simd::Backend::generic, uni::simd::Backend::avx2_fma, uni::simd::Backend::avx512,
+                               uni::simd::Backend::neon}) {
         const auto context = uni::simd::create_context({.backend = backend});
         if (!context) {
             continue;

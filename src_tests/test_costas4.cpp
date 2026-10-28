@@ -160,6 +160,8 @@ void TestCopyStateSkipAndRotate() {
     Check(uni_simd_kernel_copy_state(rotated, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
     auto* const skipped = Create(UNI_SIMD_BACKEND_AUTOMATIC);
     Check(uni_simd_kernel_copy_state(skipped, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
+    auto* const idle = Create(UNI_SIMD_BACKEND_AUTOMATIC);
+    Check(uni_simd_kernel_copy_state(idle, serial) == UNI_SIMD_RESULT_SUCCESS, "copy state");
     Process(serial, reference, kSplit, total - kSplit);
 
     // A copy continues bit for bit.
@@ -167,6 +169,14 @@ void TestCopyStateSkipAndRotate() {
     Process(copy, copied, kSplit, total - kSplit);
     for (std::size_t lane = 0U; lane < 4U; ++lane) {
         Check(std::equal(copied[lane].begin() + kSplit, copied[lane].end(), reference[lane].begin() + kSplit), "a copied state continues identically");
+    }
+
+    // Skipping no samples changes nothing.
+    Check(uni_simd_qpsk_costas4_skip(idle, 0U) == UNI_SIMD_RESULT_SUCCESS, "skip nothing");
+    auto idled = input;
+    Process(idle, idled, kSplit, total - kSplit);
+    for (std::size_t lane = 0U; lane < 4U; ++lane) {
+        Check(std::equal(idled[lane].begin() + kSplit, idled[lane].end(), reference[lane].begin() + kSplit), "skipping no samples is a no-op");
     }
 
     // A quarter-turn rotation multiplies the output by (-i)^turns and leaves the loop as it was:
@@ -228,7 +238,7 @@ void TestCopyStateSkipAndRotate() {
         Check(worst < 1e-3f, "the coasted loop settles onto the reference");
     }
     Check(uni_simd_kernel_free(locked_serial) == UNI_SIMD_RESULT_SUCCESS);
-    for (auto* const kernel : {serial, copy, rotated, skipped}) {
+    for (auto* const kernel : {serial, copy, rotated, skipped, idle}) {
         Check(uni_simd_kernel_free(kernel) == UNI_SIMD_RESULT_SUCCESS);
     }
 }

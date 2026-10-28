@@ -181,6 +181,11 @@ uni_simd_result_e QpskCostas4CopyState(uni_simd_qpsk_costas4_t& kernel, const un
 
 uni_simd_result_e QpskCostas4Skip(uni_simd_qpsk_costas4_t& kernel, const std::size_t sample_count) noexcept {
     constexpr std::size_t delay = UNI_SIMD_QPSK_COSTAS4_LOOP_DELAY;
+    if (sample_count == 0U) {
+        // Moving past no samples leaves the loops as they are; the code below would rebuild
+        // the phasor from the phase accumulator and forget the last error.
+        return UNI_SIMD_RESULT_SUCCESS;
+    }
     auto& state = kernel.state;
     const std::size_t applied = std::min(sample_count, delay);
     for (std::size_t lane = 0U; lane < UNI_SIMD_QPSK_COSTAS4_CHANNEL_COUNT; ++lane) {

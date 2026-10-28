@@ -714,7 +714,8 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
         !naturally_aligned<uni_simd_symbol_sync4_config_t>(kernel.params.config)) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
-    if (!kernel.symbol_sync4) {
+    const bool creating = !kernel.symbol_sync4;
+    if (creating) {
         // Created in place: the state carries a few kilobytes of history buffers.
         auto& created = kernel.symbol_sync4.emplace();
         const auto result = uni::simd::kernels::SymbolSync4Initialize(
@@ -728,6 +729,9 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     const auto result = uni::simd::kernels::SymbolSync4Execute(*kernel.symbol_sync4, block, *static_cast<uni_simd_symbol_sync4_result_t*>(output));
     if (result == UNI_SIMD_RESULT_SUCCESS) {
         set_resolved_backend(kernel.params, static_cast<uni::simd::Backend>(kernel.symbol_sync4->backend));
+    } else if (creating) {
+        // Only a successful first execution creates state (see uni_simd_kernel_execute()).
+        kernel.symbol_sync4.reset();
     }
     return result;
 }
@@ -738,7 +742,8 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
         !naturally_aligned<uni_simd_viterbi_k7r2_config_t>(kernel.params.config)) {
         return UNI_SIMD_RESULT_INVALID_ARGUMENT;
     }
-    if (!kernel.viterbi_k7r2) {
+    const bool creating = !kernel.viterbi_k7r2;
+    if (creating) {
         auto& created = kernel.viterbi_k7r2.emplace();
         const auto result = uni::simd::kernels::ViterbiK7R2Initialize(created, *static_cast<const uni_simd_viterbi_k7r2_config_t*>(kernel.params.config),
                                                                        kernel.params.backend);
@@ -751,6 +756,9 @@ void set_resolved_backend(ParsedParams& params, const uni::simd::Backend backend
     const auto result = uni::simd::kernels::ViterbiK7R2Execute(*kernel.viterbi_k7r2, block, *static_cast<uni_simd_viterbi_k7r2_result_t*>(output));
     if (result == UNI_SIMD_RESULT_SUCCESS) {
         set_resolved_backend(kernel.params, static_cast<uni::simd::Backend>(kernel.viterbi_k7r2->backend));
+    } else if (creating) {
+        // Only a successful first execution creates state (see uni_simd_kernel_execute()).
+        kernel.viterbi_k7r2.reset();
     }
     return result;
 }
@@ -1012,6 +1020,9 @@ uni_simd_result_e UNI_SIMD_CALL uni_simd_pfb_channelizer_advance(uni_simd_kernel
         }
         if (!kernel->pfb) {
             return UNI_SIMD_RESULT_INVALID_STATE;
+        }
+        if (input->count > std::numeric_limits<std::size_t>::max() / (2U * sizeof(float))) {
+            return UNI_SIMD_RESULT_INVALID_SIZE;
         }
         return to_c(kernel->pfb->advance({static_cast<const float*>(input->data), input->count * 2U}));
     } catch (...) {

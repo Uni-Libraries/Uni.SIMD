@@ -22,9 +22,12 @@ the project is included as a subdirectory. Use `UNI_SIMD_BUILD_TESTS`,
 CPU topology and OS-usable ISA features are provided by the vendored
 `Uni.SysInfo` submodule.
 `BUILD_SHARED_LIBS=ON` builds a shared library whose public ABI contains only
-`uni_simd_initialize`, `uni_simd_finalize`, `uni_simd_kernel_create`,
-`uni_simd_kernel_param_set`, `uni_simd_kernel_param_set_many`,
-`uni_simd_kernel_reset`, `uni_simd_kernel_execute`, and `uni_simd_kernel_free`.
+the functions declared in `uni_simd.h`: `uni_simd_initialize`, `uni_simd_finalize`,
+`uni_simd_kernel_create`, `uni_simd_kernel_param_set`, `uni_simd_kernel_param_set_many`,
+`uni_simd_kernel_reset`, `uni_simd_kernel_execute`, `uni_simd_kernel_free`,
+`uni_simd_kernel_copy_state`, `uni_simd_pfb_channelizer_copy_state`,
+`uni_simd_pfb_channelizer_advance`, `uni_simd_symbol_sync4_skip`,
+`uni_simd_qpsk_costas4_skip`, and `uni_simd_qpsk_costas4_rotate`.
 
 CMake generates `uni_simd_export.h` and `uni_simd_version.h` in the build tree.
 The installed package exports the `Uni::SIMD` target and installs those generated
@@ -125,19 +128,22 @@ The first execution validates and copies the configuration and creates streaming
 state. Later calls process blocks or query the next output count;
 `uni_simd_kernel_reset()` clears PFB history directly. The legacy one-shot RESET
 parameter remains accepted.
-Costas and carrier-analyzer configuration is supplied through `UNI_SIMD_PARAM_CONFIG`
-and copied on first execution. `uni_simd_kernel_reset()` restores the Costas initial
-state or clears analyzer adjacency state. Creation parameters cannot be changed after
-streaming state exists.
+Costas, carrier-analyzer, symbol-synchronizer and Viterbi configuration is supplied
+through `UNI_SIMD_PARAM_CONFIG` and copied by the first successful execution; a failed
+first execution creates no state. `uni_simd_kernel_reset()` restores the Costas, symbol
+synchronizer (including its sample history) or Viterbi initial state, or clears analyzer
+adjacency state. Creation parameters cannot be changed after streaming state exists.
 Streaming kernels can be split in time, so that two threads process the two halves of a
 block concurrently. `uni_simd_kernel_copy_state()` hands the complete state of one instance
 to another of the same configuration (PFB, Costas, symbol synchronizer). The second instance
 then moves to the middle of the block without producing output:
-`uni_simd_pfb_channelizer_advance()` consumes the first half exactly (the result is
-bit-identical to serial processing), while the loops of `uni_simd_symbol_sync4_skip()` and
-`uni_simd_qpsk_costas4_skip()` coast and need a warm-up before they follow the stream
-again. `uni_simd_qpsk_costas4_rotate()` moves a Costas loop onto another of the four QPSK
-lock points without disturbing it.
+`uni_simd_pfb_channelizer_advance()` consumes the first half exactly (the state equals
+that after serial processing; the outputs are bit-identical to serial processing for the
+exact half-bin 8-bin decimate-by-4 layout with bins -2..1, while other layouts batch hops
+through one inverse DFT whose rounding depends on the batch, see below), while the loops
+of `uni_simd_symbol_sync4_skip()` and `uni_simd_qpsk_costas4_skip()` coast and need a
+warm-up before they follow the stream again. `uni_simd_qpsk_costas4_rotate()` moves a
+Costas loop onto another of the four QPSK lock points without disturbing it.
 
 `uni_simd_kernel_free()` accepts NULL as a successful no-op, and
 `uni_simd_finalize()` refuses to finalize while any kernel instance remains alive.
