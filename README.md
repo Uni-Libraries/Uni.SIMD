@@ -117,6 +117,14 @@ shared radix-2 SIMD stages for 16/32-point transforms; the measured faster
 radix-decomposition is retained for AVX2/FMA IFFT-8. IFFT-4 remains generic because
 SIMD setup and permutation overhead is larger than the transform itself.
 
+## C++ API
+
+`<uni/simd/uni_simd.hpp>` is a header-only C++23 layer over the C API: `Uni::SIMD::KernelInstance`
+owns a kernel handle, and `PreparedDot`, `PreparedSymmetricDot` and `PfbChannelizer` own their
+coefficients next to the kernel. Factories return `std::expected<T, uni_simd_result_e>`, operations
+return `uni_simd_result_e`; nothing throws. No C++ type crosses the library boundary, so the header
+works with any build of the library.
+
 ## Kernel Lifetime
 
 Every operation uses an opaque `uni_simd_kernel_t`. Primitive and IFFT instances

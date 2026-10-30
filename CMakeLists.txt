@@ -107,6 +107,9 @@ if(UNI_SIMD_BUILD_TESTS)
     target_link_libraries(uni_simd_tests PRIVATE ${UNI_SIMD_INTERNAL_TARGET})
     target_include_directories(uni_simd_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_features(uni_simd_tests PRIVATE cxx_std_23)
+    add_executable(uni_simd_cpp_api_tests src_tests/test_cpp_api.cpp)
+    target_link_libraries(uni_simd_cpp_api_tests PRIVATE Uni::SIMD)
+    target_compile_features(uni_simd_cpp_api_tests PRIVATE cxx_std_23)
     add_executable(uni_simd_pfb_channelizer_tests src_tests/test_pfb_channelizer.cpp)
     target_link_libraries(uni_simd_pfb_channelizer_tests PRIVATE ${UNI_SIMD_INTERNAL_TARGET})
     target_include_directories(uni_simd_pfb_channelizer_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -156,6 +159,7 @@ if(UNI_SIMD_BUILD_TESTS)
         endforeach()
     endif()
     add_test(NAME uni_simd_tests COMMAND uni_simd_tests)
+    add_test(NAME uni_simd_cpp_api_tests COMMAND uni_simd_cpp_api_tests)
     add_test(NAME uni_simd_pfb_channelizer_tests COMMAND uni_simd_pfb_channelizer_tests)
     add_test(NAME uni_simd_c_api_tests COMMAND uni_simd_c_api_tests)
 endif()
@@ -179,6 +183,7 @@ if(PROJECT_IS_TOP_LEVEL)
             RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(FILES
             include/uni_simd.h
+            include/uni_simd.hpp
             include/uni_simd_kernels.h
             include/uni_simd_typedefs.h
             "${CMAKE_CURRENT_BINARY_DIR}/generated/uni_simd_export.h"
