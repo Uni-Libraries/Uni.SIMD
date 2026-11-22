@@ -1,5 +1,4 @@
 find_package(Threads REQUIRED)
-find_package(fmt CONFIG REQUIRED)
 
 add_executable(uni_simd_benchmark benchmark_simd.cpp cpu_topology.cpp)
 target_link_libraries(uni_simd_benchmark PRIVATE Uni::SIMD UniSysInfo::uni_sysinfo Threads::Threads)

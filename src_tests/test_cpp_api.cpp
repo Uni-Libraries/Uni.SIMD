@@ -38,10 +38,10 @@ static void Test0() {
     assert(ExecuteBuffer(*lsb, source.data(), source.size() - 1U, output.data(), output.size()) == UNI_SIMD_RESULT_INVALID_SIZE);
     assert(ExecuteBuffer(*lsb, source.data(), source.size(), output.data(), output.size() - 1U) == UNI_SIMD_RESULT_INVALID_SIZE);
     assert(ExecuteBuffer(*lsb, source.data(), source.size(), output.data(), output.size()) == UNI_SIMD_RESULT_SUCCESS);
-    assert(output == std::array<std::uint8_t, 2U>{0x4dU, 0x96U});
+    assert((output == std::array<std::uint8_t, 2U>{0x4dU, 0x96U}));
 
     assert(ExecuteBuffer(*msb, source.data(), source.size(), output.data(), output.size()) == UNI_SIMD_RESULT_SUCCESS);
-    assert(output == std::array<std::uint8_t, 2U>{0xb2U, 0x69U});
+    assert((output == std::array<std::uint8_t, 2U>{0xb2U, 0x69U}));
 }
 
 // SIMD prepared expansion and quantization kernels validate buffer sizes
@@ -74,7 +74,7 @@ static void Test2() {
     auto dot = std::move(*created);
     std::complex<float> output{};
     assert(dot.Execute(input, output) == UNI_SIMD_RESULT_SUCCESS);
-    assert(output == std::complex<float>{1.0F, -1.0F});
+    assert((output == std::complex<float>{1.0F, -1.0F}));
     assert(dot.ResolvedBackend() == UNI_SIMD_BACKEND_GENERIC);
 }
 

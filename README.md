@@ -20,7 +20,8 @@ Tests and benchmarks default to enabled for a top-level build and disabled when
 the project is included as a subdirectory. Use `UNI_SIMD_BUILD_TESTS`,
 `UNI_SIMD_BUILD_BENCHMARKS`, and `UNI_SIMD_ENABLE_SANITIZERS` to override this.
 CPU topology and OS-usable ISA features are provided by the vendored
-`Uni.SysInfo` submodule.
+`Uni.SysInfo` submodule. Benchmarks use the `fmt` submodule; no system `fmt`
+package is needed.
 `BUILD_SHARED_LIBS=ON` builds a shared library whose public ABI contains only
 the functions declared in `uni_simd.h`: `uni_simd_initialize`, `uni_simd_finalize`,
 `uni_simd_kernel_create`, `uni_simd_kernel_param_set`, `uni_simd_kernel_param_set_many`,
